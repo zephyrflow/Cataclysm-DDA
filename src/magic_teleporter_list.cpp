@@ -129,6 +129,18 @@ bool teleporter_list::knows_translocator( const tripoint_abs_omt &omt_pos ) cons
     return known_teleporters.find( omt_pos ) != known_teleporters.end();
 }
 
+bool teleporter_list::move_translocator( const tripoint_abs_omt &omt_pos,
+        const tripoint_abs_omt &omt_pos_new )
+{
+    const bool activated = knows_translocator( omt_pos );
+    if( !activated ) {
+        return false;
+    }
+    std::string point_name = known_teleporters[omt_pos];
+    known_teleporters.erase( omt_pos );
+    return known_teleporters.emplace( omt_pos_new, point_name ).second;
+}
+
 void teleporter_list::serialize( JsonOut &json ) const
 {
     json.start_object();

@@ -83,6 +83,7 @@
 #include "itype.h"
 #include "kill_tracker.h"
 #include "magic.h"
+#include "magic_teleporter_list.h"
 #include "map.h"
 #include "map_iterator.h"
 #include "map_scale_constants.h"
@@ -4931,6 +4932,8 @@ talk_effect_fun_t::func f_copy_location( const JsonObject &jo, std::string_view 
                                         sm->get_revert_submap(), key.evaluate( d ) );
             }
         }
+        avatar &player_character = get_avatar();
+        player_character.translocators.move_translocator( omt_pos, omt_pos_new );
         reality_bubble().invalidate_map_cache( omt_pos_new.z() );
     };
 }
