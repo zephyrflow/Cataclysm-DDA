@@ -2,7 +2,9 @@
 #include "activity_item_handling.h" // IWYU pragma: associated
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <deque>
 #include <cstdlib>
 #include <list>
 #include <memory>
@@ -148,6 +150,8 @@ static const zone_type_id zone_type_LOOT_CORPSE( "LOOT_CORPSE" );
 static const zone_type_id zone_type_LOOT_CUSTOM( "LOOT_CUSTOM" );
 static const zone_type_id zone_type_LOOT_IGNORE( "LOOT_IGNORE" );
 static const zone_type_id zone_type_LOOT_IGNORE_FAVORITES( "LOOT_IGNORE_FAVORITES" );
+static const zone_type_id zone_type_LOOT_ITEM_GROUP( "LOOT_ITEM_GROUP" );
+static const zone_type_id zone_type_LOOT_UNSORTED( "LOOT_UNSORTED" );
 static const zone_type_id zone_type_LOOT_WOOD( "LOOT_WOOD" );
 static const zone_type_id zone_type_MINING( "MINING" );
 static const zone_type_id zone_type_MOPPING( "MOPPING" );
@@ -526,8 +530,12 @@ std::vector<item_location> drop_on_map( Character &you, item_drop_reason reason,
     }
     std::vector<item_location> items_dropped;
     for( const item &it : items ) {
-        item &dropped_item = here->add_item_or_charges( where, it );
-        items_dropped.emplace_back( map_cursor( here, where ), &dropped_item );
+        // Use ret_loc variant so the item_location tracks the actual position,
+        // which may differ from 'where' if the tile overflowed to an adjacent one.
+        item_location dropped_loc = here->add_item_or_charges_ret_loc( where, it );
+        if( dropped_loc.get_item() ) {
+            items_dropped.push_back( std::move( dropped_loc ) );
+        }
         item( it ).handle_pickup_ownership( you );
     }
 
@@ -761,13 +769,123 @@ static void move_item( Character &you, item &it, const int quantity, const tripo
 namespace zone_sorting
 {
 
+// Cache routes computed by route_length() for reuse by route_to_destination().
+// Avoids recomputing the same A* when the sorter probes route distance and
+// then immediately routes to the same destination.
+namespace
+{
+struct zone_route_cache {
+    static constexpr size_t max_entries = 200;
+
+    tripoint_bub_ms start;
+    object_type grab_type = object_type::NONE;
+    tripoint_rel_ms grab_point;
+    int arm_str = 0;
+    units::mass veh_mass = 0_gram;
+    // destination -> route. Empty route means unreachable.
+    std::unordered_map<tripoint_bub_ms, std::vector<tripoint_bub_ms>> entries;
+    // FIFO eviction order -- front is oldest.
+    std::deque<tripoint_bub_ms> insertion_order;
+    bool initialized = false;
+
+    void ensure_valid( const Character &who ) {
+        object_type gt = object_type::NONE;
+        tripoint_rel_ms gp;
+        int cur_arm_str = 0;
+        units::mass cur_veh_mass = 0_gram;
+        if( who.is_avatar() ) {
+            gt = who.as_avatar()->get_grab_type();
+            gp = who.as_avatar()->grab_point;
+            if( gt == object_type::VEHICLE ) {
+                map &here = get_map();
+                const tripoint_bub_ms veh_pos = who.pos_bub() + gp;
+                const optional_vpart_position ovp = here.veh_at( veh_pos );
+                if( ovp && ovp->vehicle().get_points().size() == 1 ) {
+                    cur_arm_str = who.get_arm_str();
+                    cur_veh_mass = ovp->vehicle().total_mass( here );
+                }
+            }
+        }
+        if( !initialized || start != who.pos_bub() || grab_type != gt ||
+            grab_point != gp || arm_str != cur_arm_str || veh_mass != cur_veh_mass ) {
+            start = who.pos_bub();
+            grab_type = gt;
+            grab_point = gp;
+            arm_str = cur_arm_str;
+            veh_mass = cur_veh_mass;
+            entries.clear();
+            insertion_order.clear();
+            initialized = true;
+        }
+    }
+
+    const std::vector<tripoint_bub_ms> *find( const tripoint_bub_ms &dest ) const {
+        auto it = entries.find( dest );
+        if( it != entries.end() ) {
+            return &it->second;
+        }
+        return nullptr;
+    }
+
+    void store( const tripoint_bub_ms &dest, std::vector<tripoint_bub_ms> route ) {
+        auto it = entries.find( dest );
+        if( it != entries.end() ) {
+            it->second = std::move( route );
+            return;
+        }
+        while( entries.size() >= max_entries && !insertion_order.empty() ) {
+            entries.erase( insertion_order.front() );
+            insertion_order.pop_front();
+        }
+        entries.emplace( dest, std::move( route ) );
+        insertion_order.push_back( dest );
+    }
+};
+
+zone_route_cache g_route_cache;
+} // namespace
+
 bool route_to_destination( Character &you, player_activity &act,
                            const tripoint_bub_ms &dest, zone_activity_stage &stage )
 {
-    const map &here = get_map();
-    //attempt to route to out-of-bubble position
+    map &here = get_map();
     std::vector<tripoint_bub_ms> route;
-    route = here.route( you, pathfinding_target::adjacent( dest ) );
+
+    // Check if route_length() already computed a path for this destination.
+    g_route_cache.ensure_valid( you );
+    bool used_grab_routing = false;
+    bool from_cache = false;
+    if( const std::vector<tripoint_bub_ms> *cached = g_route_cache.find( dest ) ) {
+        if( !cached->empty() ) {
+            route = *cached;
+            from_cache = true;
+            used_grab_routing = ( you.is_avatar() &&
+                                  you.as_avatar()->get_grab_type() == object_type::VEHICLE );
+        }
+    }
+
+    if( route.empty() && !from_cache ) {
+        // Use grab-aware A* when dragging a single-tile vehicle - searches over
+        // (position, grab_direction) state so both player and cart can move.
+        if( has_grabbed_single_tile_vehicle( you, here ) ) {
+            // Single-tile vehicle: use grab-aware A*. If no path found,
+            // treat as unreachable (don't fall back to player-only routing
+            // which would cause cart collisions).
+            used_grab_routing = true;
+            route = route_with_grab( here, you, pathfinding_target::adjacent( dest ) );
+        } else {
+            route = here.route( you, pathfinding_target::adjacent( dest ) );
+        }
+    }
+
+    add_msg_debug( debugmode::DF_ACTIVITY,
+                   "route_to_dest: dest=(%d,%d) %s route_len=%zu %s",
+                   dest.x(), dest.y(),
+                   from_cache ? "cached" :
+                   ( used_grab_routing ? "grab_astar" : "normal_astar" ),
+                   route.size(),
+                   route.empty() ? "FAILED" : "OK" );
+
     if( route.empty() ) {
         add_msg( m_info, _( "%s can't reach the source tile.  Try to sort out loot without a cart." ),
                  you.disp_name() );
@@ -818,13 +936,17 @@ bool sort_skip_item( Character &you, const item *it,
     const faction_id fac_id = _fac_id( you );
     const zone_type_id zt_id = mgr.get_near_zone_type_for_item( *it, you.pos_abs(),
                                MAX_VIEW_DISTANCE, fac_id );
-    // skip items that are already where they should be in for non-UNSORTED/CUSTOM zones
-    if( zt_id != zone_type_LOOT_CUSTOM && mgr.has( zt_id, src, fac_id ) ) {
+    // Skip items already at their destination regardless of whether the zone
+    // is bound to terrain or vehicle cargo. Delivery tries cargo first, so
+    // items often land in vehicle storage even at terrain-bound zones (e.g.,
+    // a fridge appliance on a LOOT_FOOD tile). Binding-agnostic check
+    // prevents infinite re-sort loops in that situation.
+    if( zt_id != zone_type_LOOT_CUSTOM && zt_id != zone_type_LOOT_ITEM_GROUP &&
+        mgr.has( zt_id, src, fac_id ) ) {
         return true;
     }
-    // ...and then for CUSTOM zones
-    if( zt_id == zone_type_LOOT_CUSTOM &&
-        mgr.custom_loot_has( src, it, zone_type_LOOT_CUSTOM, fac_id ) ) {
+    if( ( zt_id == zone_type_LOOT_CUSTOM || zt_id == zone_type_LOOT_ITEM_GROUP ) &&
+        mgr.custom_loot_has( src, it, zt_id, fac_id ) ) {
         return true;
     }
 
@@ -871,17 +993,15 @@ zone_items populate_items( const tripoint_bub_ms &src_bub )
     const std::optional<vpart_reference> vp = here.veh_at( src_bub ).cargo();
 
     zone_items items;
-    // Check source for cargo part
-    // map_stack and vehicle_stack are different types but inherit from item_stack
-    // TODO: use one for loop
+    // Collect items from both vehicle cargo and ground at this tile.
+    // The bool in each pair tracks whether the item is from vehicle cargo.
     if( vp ) {
         for( item &it : vp->items() ) {
             items.emplace_back( &it, true );
         }
-    } else {
-        for( item &it : here.i_at( src_bub ) ) {
-            items.emplace_back( &it, false );
-        }
+    }
+    for( item &it : here.i_at( src_bub ) ) {
+        items.emplace_back( &it, false );
     }
     return items;
 }
@@ -927,7 +1047,36 @@ bool has_items_to_sort( Character &you, const tripoint_abs_ms &src,
 
     *pickup_failure = false;
 
+    // Any UNSORTED zone at src (terrain or vehicle) makes all items at that
+    // tile eligible for sorting. The terrain/vehicle distinction only matters
+    // at the destination (where items get placed), not at the source.
+    const bool src_has_unsorted = mgr.has( zone_type_LOOT_UNSORTED, src, fac_id );
+    const bool src_has_vehicle_unsorted = mgr.has_vehicle( zone_type_LOOT_UNSORTED, src, fac_id );
+
+    // When grabbed cart sits on the source tile, items stay in cart cargo
+    // (virtual pickup) so the player carry capacity check doesn't apply.
+    bool virtual_pickup_available = false;
+    if( you.is_avatar() && you.as_avatar()->get_grab_type() == object_type::VEHICLE ) {
+        const tripoint_bub_ms cart_pos = you.pos_bub() + you.as_avatar()->grab_point;
+        if( get_map().get_abs( cart_pos ) == src ) {
+            virtual_pickup_available = get_map().veh_at( cart_pos ).cargo().has_value();
+        }
+    }
+
+    // When the grabbed cart is at a terrain-only unsorted zone (no vehicle
+    // zone), it's being used for transport - don't re-sort its cargo.
+    // If there IS a vehicle zone on the cart, the user explicitly wants
+    // the cart's cargo sorted.
+    const bool skip_cart_cargo = virtual_pickup_available && !src_has_vehicle_unsorted;
+
     for( std::pair<item *, bool> it_pair : items ) {
+        if( !src_has_unsorted ) {
+            continue;
+        }
+        if( it_pair.second && skip_cart_cargo ) {
+            continue;
+        }
+
         item *it = it_pair.first;
         const zone_type_id dest_zone_type_id = mgr.get_near_zone_type_for_item( *it, abspos,
                                                MAX_VIEW_DISTANCE, fac_id );
@@ -936,9 +1085,21 @@ bool has_items_to_sort( Character &you, const tripoint_abs_ms &src,
             continue;
         }
 
-        if( !you.can_add( *it ) ) {
-            *pickup_failure = true;
-            continue;
+        // Virtual pickup only applies to vehicle items
+        if( !( virtual_pickup_available && it_pair.second ) && !you.can_add( *it ) ) {
+            bool vehicle_can_hold = false;
+            if( you.is_avatar() && you.as_avatar()->get_grab_type() == object_type::VEHICLE ) {
+                const tripoint_bub_ms cart_pos = you.pos_bub() + you.as_avatar()->grab_point;
+                if( std::optional<vpart_reference> ovp = get_map().veh_at( cart_pos ).cargo() ) {
+                    // Approximation: only checks volume, not weight or other cargo constraints.
+                    // If this over-reports, the empty-pickup guard in stage_do handles it.
+                    vehicle_can_hold = ovp->items().free_volume() >= it->volume();
+                }
+            }
+            if( !vehicle_can_hold ) {
+                *pickup_failure = true;
+                continue;
+            }
         }
 
         if( sort_skip_item( you, it, other_activity_items,
@@ -1066,6 +1227,7 @@ std::optional<bool> unload_item( Character &you, const tripoint_abs_ms &src,
                             continue;
                         }
                         unload_teleport_item( contained );
+                        moved_something = true;
                     }
                     if( you.get_moves() <= 0 ) {
                         return std::nullopt;
@@ -1082,6 +1244,7 @@ std::optional<bool> unload_item( Character &you, const tripoint_abs_ms &src,
                             }
                         }
                         unload_teleport_item( contained );
+                        moved_something = true;
                     }
 
                     // destroy fully unloaded magazines
@@ -1100,9 +1263,9 @@ std::optional<bool> unload_item( Character &you, const tripoint_abs_ms &src,
                 for( item *contained : it->all_items_top( pocket_type::MAGAZINE_WELL ) ) {
                     if( zone_sorting::can_unload( contained ) ) {
                         unload_teleport_item( contained );
+                        moved_something = true;
                     }
                 }
-                moved_something = true;
 
             }
 
@@ -1179,6 +1342,71 @@ void move_item( Character &you, const std::optional<vpart_reference> &vpr_src,
             break;
         }
     }
+}
+int route_length( const Character &you, const tripoint_bub_ms &dest )
+{
+    if( square_dist( you.pos_bub(), dest ) <= 1 ) {
+        return 0;
+    }
+
+    g_route_cache.ensure_valid( you );
+
+    if( const std::vector<tripoint_bub_ms> *cached = g_route_cache.find( dest ) ) {
+        return cached->empty() ? INT_MAX : static_cast<int>( cached->size() );
+    }
+
+    map &here = get_map();
+    std::vector<tripoint_bub_ms> route;
+
+    if( has_grabbed_single_tile_vehicle( you, here ) ) {
+        route = route_with_grab( here, you, pathfinding_target::adjacent( dest ) );
+    } else {
+        route = here.route( you, pathfinding_target::adjacent( dest ) );
+    }
+
+    g_route_cache.store( dest, route );
+    return route.empty() ? INT_MAX : static_cast<int>( route.size() );
+}
+
+std::optional<tripoint_bub_ms> worst_drag_tile_on_route(
+    const Character &who, const std::vector<tripoint_abs_ms> &dropoff_coords )
+{
+    if( !who.is_avatar() ||
+        who.as_avatar()->get_grab_type() != object_type::VEHICLE ) {
+        return std::nullopt;
+    }
+    map &here = get_map();
+    const tripoint_bub_ms veh_pos = who.pos_bub() + who.as_avatar()->grab_point;
+    const optional_vpart_position ovp = here.veh_at( veh_pos );
+    if( !ovp || ovp->vehicle().get_points().size() != 1 ) {
+        return std::nullopt;
+    }
+    if( dropoff_coords.empty() ) {
+        return std::nullopt;
+    }
+    const tripoint_bub_ms dest_bub = here.get_bub( dropoff_coords.front() );
+    // Trigger route computation and caching in g_route_cache.
+    const int rlen = route_length( who, dest_bub );
+    if( rlen == INT_MAX || rlen == 0 ) {
+        return std::nullopt;
+    }
+    g_route_cache.ensure_valid( who );
+    const std::vector<tripoint_bub_ms> *route = g_route_cache.find( dest_bub );
+    if( !route || route->empty() ) {
+        return std::nullopt;
+    }
+    vehicle &veh = ovp->vehicle();
+    const units::mass cur_mass = veh.total_mass( here );
+    int worst_req = 0;
+    std::optional<tripoint_bub_ms> worst_tile;
+    for( const tripoint_bub_ms &pos : *route ) {
+        const int req = veh.drag_str_req_at( here, pos, cur_mass );
+        if( req > worst_req ) {
+            worst_req = req;
+            worst_tile = pos;
+        }
+    }
+    return worst_tile;
 }
 } //namespace zone_sorting
 
@@ -2983,7 +3211,7 @@ static int chop_moves( Character &you, item &it )
     const int quality = it.get_quality( qual_AXE );
 
     // attribute; regular tools - based on STR, powered tools - based on DEX
-    const int attr = it.has_flag( flag_POWERED ) ? you.dex_cur : you.get_arm_str();
+    const int attr = it.has_flag( flag_POWERED ) ? you.get_dex() : you.get_arm_str();
 
     int moves = to_moves<int>( time_duration::from_minutes( 60 - attr ) / std::pow( 2, quality - 1 ) );
     const int helpersize = you.get_num_crafting_helpers( 3 );
@@ -4042,14 +4270,14 @@ int get_auto_consume_moves( Character &you, const bool food )
 }
 
 // Try to add fuel to a fire. Return true if there is both fire and fuel; return false otherwise.
-bool try_fuel_fire( player_activity &act, Character &you, const bool starting_fire )
+bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
 {
     const tripoint_bub_ms pos = you.pos_bub();
     std::vector<tripoint_bub_ms> adjacent = closest_points_first( pos, 1, PICKUP_RANGE );
 
     map &here = get_map();
     std::optional<tripoint_bub_ms> best_fire =
-        starting_fire ? here.get_bub( act.placement ) : find_best_fire( adjacent, pos );
+        fire_target ? fire_target : find_best_fire( adjacent, pos );
 
     if( !best_fire || !here.accessible_items( *best_fire ) ) {
         return false;
@@ -4086,7 +4314,7 @@ bool try_fuel_fire( player_activity &act, Character &you, const bool starting_fi
 
     // Enough to sustain the fire
     // TODO: It's not enough in the rain
-    if( !starting_fire && ( fd.fuel_produced >= 1.0f || fire_age < 10_minutes ) ) {
+    if( !fire_target && ( fd.fuel_produced >= 1.0f || fire_age < 10_minutes ) ) {
         return true;
     }
 

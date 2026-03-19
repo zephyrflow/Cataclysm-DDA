@@ -17,6 +17,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,7 @@
 #include "activity_actor_definitions.h"
 #include "avatar.h"
 #include "basecamp.h"
+#include "behavior.h"
 #include "bionics.h"
 #include "body_part_set.h"
 #include "bodypart.h"
@@ -32,6 +34,7 @@
 #include "character.h"
 #include "character_attire.h"
 #include "character_id.h"
+#include "character_oracle.h"
 #include "clzones.h"
 #include "coordinates.h"
 #include "creature.h"
@@ -188,6 +191,8 @@ static const npc_class_id NC_EVAC_SHOPKEEP( "NC_EVAC_SHOPKEEP" );
 
 static const skill_id skill_firstaid( "firstaid" );
 
+static const string_id<behavior::node_t> behavior_node_t_npc_needs( "npc_needs" );
+
 static const trait_id trait_IGNORE_SOUND( "IGNORE_SOUND" );
 static const trait_id trait_RETURN_TO_START_POS( "RETURN_TO_START_POS" );
 
@@ -196,6 +201,9 @@ static const zone_type_id zone_type_NPC_RETREAT( "NPC_RETREAT" );
 
 static constexpr float MAX_FLOAT = 5000000000.0f;
 
+// Legacy thresholds for NPC food consumption and complaints.
+// The behavior tree in npc_behavior.json uses different thresholds
+// via character_oracle predicates (see character_oracle.cpp).
 // TODO: These would be much better using common code or constants from character.cpp,
 // which handles the player formatting of thirst/hunger levels. Right now we
 // have magic numbers all over the place. ;(
@@ -1407,6 +1415,15 @@ void npc::move()
     }
     add_msg_debug( debugmode::DF_NPC, "NPC %s: target = %s, danger = %.1f, range = %d",
                    get_name(), target_name, ai_cache.danger, *confident_range_cache );
+
+    if( debug_mode && debugmode::enabled_filters.count( debugmode::DF_NPC_NEEDS ) ) {
+        behavior::character_oracle_t oracle( this );
+        behavior::tree needs;
+        needs.add( &behavior_node_t_npc_needs.obj() );
+        const std::string bt_goal = needs.tick( &oracle );
+        add_msg_debug( debugmode::DF_NPC_NEEDS,
+                       "NPC %s: BT needs goal = %s", get_name(), bt_goal );
+    }
 
     Character &player_character = get_player_character();
     //faction opinion determines if it should consider you hostile
@@ -2865,7 +2882,7 @@ bool npc::wont_hit_friend( const tripoint_bub_ms &tar, const item &it, bool thro
         // TODO: Extract common functions with turret target selection
         units::angle safe_angle_ally = safe_angle;
         units::angle ally_angle = coord_to_angle( pos_bub(), ally.pos_bub() );
-        units::angle angle_diff = units::fabs( ally_angle - target_angle );
+        units::angle angle_diff = units::abs( ally_angle - target_angle );
         angle_diff = std::min( 360_degrees - angle_diff, angle_diff );
         if( angle_diff < safe_angle_ally ) {
             // TODO: Disable NPC whining is it's other NPC who prevents aiming
@@ -4198,6 +4215,13 @@ item *npc::evaluate_best_weapon() const
 
     //Now check through the NPC's inventory for melee weapons, guns, or holstered items
     visit_items( [this, &weap, &best_value, &best]( item * node, item * ) {
+        if( node == &weap ) {
+            // Weapon is already evaluated above with danger multiplier.
+            // Return NEXT to visit its contents (items inside containers
+            // that might be better weapons). CONTAINER pockets only -
+            // gun mags/mods are in non-CONTAINER pockets, not visited.
+            return VisitResponse::NEXT;
+        }
         if( can_wield( *node ).success() ) {
             double weapon_value = 0.0;
             bool using_same_type_bionic_weapon = is_using_bionic_weapon()
@@ -4725,7 +4749,7 @@ bool npc::consume_food()
 
     if( inv_food.empty() ) {
         if( !needs_food() ) {
-            // TODO: Remove this and let player "exploit" hungry NPCs
+            // When NO_NPC_FOOD is active and NPC has no food, silently reset hunger/thirst
             set_hunger( 0 );
             set_thirst( 0 );
         }
@@ -5398,7 +5422,7 @@ bool npc::complain()
     }
 
     // Hunger every 3-6 hours
-    // Since NPCs can't starve to death, respect the rules
+    // Complaint frequency scales with hunger level
     if( get_hunger() > NPC_HUNGER_COMPLAIN &&
         complain_about( hunger_string,
                         std::max( 3_hours, time_duration::from_minutes( 60 * 8 - get_hunger() ) ),
@@ -5407,7 +5431,6 @@ bool npc::complain()
     }
 
     // Thirst every 2 hours
-    // Since NPCs can't dry to death, respect the rules
     if( get_thirst() > NPC_THIRST_COMPLAIN &&
         complain_about( thirst_string, 2_hours, chat_snippets().snip_thirsty.translated() ) ) {
         return true;

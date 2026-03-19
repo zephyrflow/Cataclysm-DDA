@@ -635,6 +635,13 @@ void body_part_type::check() const
     if( next != next->connected_to ) {
         debugmsg( "Loop in body part connectedness starting from %s", id.str() );
     }
+
+    if( !windage_effect.is_valid() ) {
+        debugmsg( "Body part %s has invalid windage_effect %s", id.c_str(), windage_effect.c_str() );
+    }
+    if( !no_power_effect.is_valid() ) {
+        debugmsg( "Body part %s has invalid no_power_effect %s", id.c_str(), no_power_effect.c_str() );
+    }
 }
 
 float body_part_type::get_limb_score( const limb_score_id &id ) const
@@ -974,11 +981,6 @@ float bodypart::get_wetness_percentage() const
     }
 }
 
-efftype_id bodypart::get_windage_effect() const
-{
-    return id->windage_effect;
-}
-
 bool bodypart::compare_encumbrance_data( const bodypart &bp ) const
 {
     return encumb_data == bp.encumb_data;
@@ -1094,14 +1096,34 @@ std::vector<wound> bodypart::get_wounds() const
     return wounds;
 }
 
-void bodypart::add_wound( wound &wd )
-{
-    wounds.push_back( wd );
-}
-
-void bodypart::add_wound( wound_type_id wd )
+void bodypart::add_wound( const wound &wd )
 {
     wounds.emplace_back( wd );
+}
+
+void bodypart::add_wound( const wound_type_id wd )
+{
+    wounds.emplace_back( wd );
+}
+
+bool bodypart::has_wound( const wound_type_id wd ) const
+{
+    for( const wound &wound : wounds ) {
+        if( wound.type == wd ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void bodypart::remove_wound( const wound_type_id wd )
+{
+    const auto it = std::find_if( wounds.begin(), wounds.end(), [wd]( const wound & existing_wound ) {
+        return existing_wound.type == wd;
+    } );
+    if( it != wounds.end() ) {
+        wounds.erase( it );
+    }
 }
 
 void bodypart::update_wounds( time_duration time_passed )
