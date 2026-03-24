@@ -2163,7 +2163,8 @@
         },
         "emitter": "emit_pyrokinetic_aura_12"
       }
-    ]
+    ],
+    "flags": [ "RAIN_IMMUNE", "SNOWWALKING" ]
   },
   {
     "type": "effect_type",

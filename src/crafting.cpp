@@ -485,7 +485,9 @@ int64_t Character::expected_time_to_craft( const recipe &rec, int batch_size ) c
 {
     const size_t assistants = available_assistant_count( rec );
     float modifier = crafting_speed_multiplier( rec );
-    return rec.batch_time( *this, batch_size, modifier, assistants );
+    std::vector<float> tool_speeds = compute_tool_speeds( rec, *this );
+    const std::vector<float> *ts = tool_speeds.empty() ? nullptr : &tool_speeds;
+    return rec.batch_time( *this, batch_size, modifier, assistants, ts );
 }
 
 bool Character::check_eligible_containers_for_crafting( const recipe &rec, int batch_size ) const
@@ -1061,9 +1063,17 @@ bool Character::craft_proficiency_gain( const item &craft, const time_duration &
 
     bool this_character_gained = false;
 
+    // For step recipes, use the current step's proficiency list so learning
+    // is targeted to the step being worked on. For stepless recipes, use the
+    // recipe-wide aggregate.
+    const std::vector<recipe_proficiency> &active_profs =
+        making.has_steps()
+        ? making.steps()[craft.get_current_step()].proficiencies
+        : making.get_proficiencies();
+
     for( Character *p : all_crafters ) {
         std::vector<learn_subject> subjects;
-        for( const recipe_proficiency &prof : making.get_proficiencies() ) {
+        for( const recipe_proficiency &prof : active_profs ) {
             // Required profs (time_multiplier == 0) gate access, not learning
             if( prof.time_multiplier == 0.0f ) {
                 continue;

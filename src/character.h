@@ -3265,6 +3265,7 @@ class Character : public Creature, public visitable
          *  @param target where the first shot is aimed at (may vary for later shots)
          *  @param shots maximum number of shots to fire (less may be fired in some circumstances)
          *  @param gun item to fire (which does not necessary have to be in the players possession)
+         *  @param ammo item_location of ammunition for RAS (reload after shot) weapon like arrows
          *  @return number of shots actually fired
          */
         int fire_gun( map &here, const tripoint_bub_ms &target, int shots, item &gun,
@@ -3405,6 +3406,7 @@ class Character : public Creature, public visitable
         std::string visible_mutations( int visibility_cap ) const;
 
         player_activity get_destination_activity() const;
+        const player_activity &peek_destination_activity() const;
         void set_destination_activity( const player_activity &new_destination_activity );
         void clear_destination_activity();
 

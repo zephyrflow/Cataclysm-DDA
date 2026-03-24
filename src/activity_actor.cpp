@@ -391,6 +391,8 @@ static const ter_str_id ter_t_door_c( "t_door_c" );
 static const ter_str_id ter_t_door_locked_alarm( "t_door_locked_alarm" );
 static const ter_str_id ter_t_door_metal_c( "t_door_metal_c" );
 static const ter_str_id ter_t_door_metal_locked( "t_door_metal_locked" );
+static const ter_str_id ter_t_greenhouse( "t_greenhouse" );
+static const ter_str_id ter_t_greenhouse_tilled( "t_greenhouse_tilled" );
 static const ter_str_id ter_t_stump( "t_stump" );
 static const ter_str_id ter_t_tree( "t_tree" );
 static const ter_str_id ter_t_trunk( "t_trunk" );
@@ -1444,14 +1446,14 @@ int hacksaw_activity_actor::get_tool_quality() const
     int qual = 0;
     if( type.has_value() ) {
         item veh_tool = item( type.value(), calendar::turn );
-        for( const std::pair<const quality_id, int> &quality : type.value()->qualities ) {
+        for( const auto &quality : type.value()->qualities ) {
             if( quality.first == qual_SAW_M ) {
-                qual = quality.second;
+                qual = quality.second.level;
             }
         }
-        for( const std::pair<const quality_id, int> &quality : type.value()->charged_qualities ) {
+        for( const auto &quality : type.value()->charged_qualities ) {
             if( quality.first == qual_SAW_M ) {
-                qual = std::max( qual, quality.second );
+                qual = std::max( qual, quality.second.level );
             }
         }
     } else {
@@ -5719,6 +5721,28 @@ void craft_activity_actor::do_turn( player_activity &act, Character &crafter )
     const std::optional<tripoint_bub_ms> location = craft_item.where() == item_location::type::character
             ? std::optional<tripoint_bub_ms>() : std::optional<tripoint_bub_ms>( craft_item.pos_bub( here ) );
     const recipe &rec = craft.get_making();
+
+    // Legacy migration: older saves have step recipes with item_counter but no
+    // current_step/step_progress. Derive step state once, before any work or
+    // exertion computation. Guard ensures this runs at most once.
+    if( rec.has_steps() && craft.get_current_step() == 0 &&
+        craft.get_step_progress() == 0.0 && craft.item_counter > 0 ) {
+        // Need base_total_moves for conversion; compute it fresh here.
+        const double migration_base = std::max( 1.0,
+                                                static_cast<double>( rec.batch_time( crafter, craft.get_making_batch_size(), 1.0f, 0 ) ) );
+        double accumulated = craft.item_counter * migration_base / 10000000.0;
+        for( size_t i = 0; i < rec.steps().size(); ++i ) {
+            double budget = rec.step_budget_moves( crafter, i,
+                                                   craft.get_making_batch_size() );
+            if( accumulated < budget || i == rec.steps().size() - 1 ) {
+                craft.set_current_step( static_cast<int>( i ) );
+                craft.set_step_progress( accumulated );
+                break;
+            }
+            accumulated -= budget;
+        }
+    }
+
     if( !use_cached_workbench_multiplier ) {
         cached_workbench_multiplier = crafter.workbench_crafting_speed_multiplier( craft, location );
         use_cached_workbench_multiplier = true;
@@ -5737,15 +5761,18 @@ void craft_activity_actor::do_turn( player_activity &act, Character &crafter )
     if( cached_crafting_speed != crafting_speed || cached_assistants != assistants ) {
         cached_crafting_speed = crafting_speed;
         cached_assistants = assistants;
+        // Recompute per-step tool speed from current crafting inventory
+        cached_tool_speeds = compute_tool_speeds( rec, crafter );
+        const std::vector<float> *ts = cached_tool_speeds.empty() ? nullptr : &cached_tool_speeds;
 
         // Base moves for batch size with no speed modifier or assistants
         // Must ensure >= 1 so we don't divide by 0;
         cached_base_total_moves = std::max( static_cast<int64_t>( 1 ),
-                                            rec.batch_time( crafter, craft.get_making_batch_size(), 1.0f, 0 ) );
+                                            rec.batch_time( crafter, craft.get_making_batch_size(), 1.0f, 0, ts ) );
         // Current expected total moves, includes crafting speed modifiers and assistants
         cached_cur_total_moves = std::max( static_cast<int64_t>( 1 ),
                                            rec.batch_time( crafter, craft.get_making_batch_size(), crafting_speed,
-                                                   assistants ) );
+                                                   assistants, ts ) );
     }
     const double base_total_moves = cached_base_total_moves;
     const double cur_total_moves = cached_cur_total_moves;
@@ -5768,6 +5795,22 @@ void craft_activity_actor::do_turn( player_activity &act, Character &crafter )
 
     // This is to ensure we don't over count skill steps
     craft.item_counter = std::min( craft.item_counter, 10000000 );
+
+    // Step transitions: accumulate work and advance through step boundaries.
+    if( rec.has_steps() ) {
+        craft.mod_step_progress( delta_progress );
+        const int last_step_idx = static_cast<int>( rec.steps().size() ) - 1;
+        const std::vector<float> *ts = cached_tool_speeds.empty() ? nullptr : &cached_tool_speeds;
+        while( craft.get_current_step() < last_step_idx ) {
+            const double budget = rec.step_budget_moves( crafter,
+                                  craft.get_current_step(), craft.get_making_batch_size(), ts );
+            if( craft.get_step_progress() < budget ) {
+                break;
+            }
+            craft.set_step_progress( craft.get_step_progress() - budget );
+            craft.set_current_step( craft.get_current_step() + 1 );
+        }
+    }
 
     // This nominal craft time is also how many practice ticks to perform
     // spread out evenly across the actual duration.
@@ -5879,11 +5922,32 @@ std::string craft_activity_actor::get_progress_message( const player_activity & 
         //We have somehow lost the craft item.  This will be handled in do_turn in the check_if_craft_is_ok call.
         return "";
     }
-    return craft_item.get_item()->tname();
+    const item *it = craft_item.get_item();
+    const recipe &making = it->get_making();
+    if( making.has_steps() ) {
+        int step_idx = it->get_current_step();
+        step_idx = std::clamp( step_idx, 0,
+                               static_cast<int>( making.steps().size() ) - 1 );
+        const recipe_step &step = making.steps()[step_idx];
+        return string_format( "%s - %s", it->tname(), step.name.translated() );
+    }
+    return it->tname();
 }
 
 float craft_activity_actor::exertion_level() const
 {
+    if( craft_item ) {
+        const item *it = craft_item.get_item();
+        if( it ) {
+            const recipe &rec = it->get_making();
+            if( rec.has_steps() ) {
+                int step = it->get_current_step();
+                step = std::clamp( step, 0,
+                                   static_cast<int>( rec.steps().size() ) - 1 );
+                return rec.steps()[step].exertion;
+            }
+        }
+    }
     return activity_override;
 }
 
@@ -6443,7 +6507,11 @@ void plant_seed_activity_actor::finish( player_activity &act, Character &who )
             here.furn( examp )->plant != nullptr ) {
             here.furn_set( examp, here.furn( examp )->plant->transform );
         } else if( seed_id->seed->required_terrain_flag == ter_furn_flag::TFLAG_PLANTABLE ) {
-            here.set( examp, ter_t_dirt, furn_f_plant_seed );
+            if( here.ter( examp ).id() == ter_t_greenhouse_tilled ) {
+                here.set( examp, ter_t_greenhouse, furn_f_plant_seed );
+            } else {
+                here.set( examp, ter_t_dirt, furn_f_plant_seed );
+            }
         } else {
             here.furn_set( examp, furn_f_plant_seed );
         }
@@ -9322,8 +9390,15 @@ void churn_activity_actor::start( player_activity &act, Character & )
 void churn_activity_actor::finish( player_activity &act, Character &who )
 {
     map &here = get_map();
-    who.add_msg_if_player( _( "You finish churning up the earth here." ) );
-    here.ter_set( here.get_bub( act.placement ), ter_t_dirtmound );
+    tripoint_bub_ms examp = here.get_bub( act.placement );
+
+    if( here.ter( examp ).id() == ter_t_greenhouse ) {
+        here.ter_set( examp, ter_t_greenhouse_tilled );
+        who.add_msg_if_player( _( "You finish preparing the greenhouse here." ) );
+    } else {
+        here.ter_set( examp, ter_t_dirtmound );
+        who.add_msg_if_player( _( "You finish churning up the earth here." ) );
+    }
     // Go back to what we were doing before
     // could be player zone activity, or could be NPC multi-farming
     act.set_to_null();
@@ -12845,6 +12920,30 @@ void zone_sort_activity_actor::do_turn( player_activity &act, Character &you )
 {
     update_other_activity_items();
     zone_activity_actor::do_turn( act, you );
+
+    // True completion: activity nulled AND no auto-move destination pending.
+    // route_to_destination sets destination before nulling; true end does not.
+    if( act.is_null() && !you.has_destination() && viewport_was_active ) {
+        restore_viewport( you );
+    }
+}
+
+void zone_sort_activity_actor::canceled( player_activity &, Character &you )
+{
+    restore_viewport( you );
+}
+
+void zone_sort_activity_actor::restore_viewport( Character &you )
+{
+    if( !viewport_was_active || !you.is_avatar() ) {
+        return;
+    }
+    if( !test_mode ) {
+        g->set_zoom( viewport_saved_zoom );
+        g->mark_main_ui_adaptor_resize();
+    }
+    you.as_avatar()->zone_sort_viewport = {};
+    viewport_was_active = false;
 }
 
 void zone_sort_activity_actor::stage_init( player_activity &, Character &you )
@@ -12858,6 +12957,29 @@ void zone_sort_activity_actor::stage_init( player_activity &, Character &you )
                        you.get_faction_id() ) ) {
         coord_set.insert( p );
     }
+
+    if( you.is_avatar() && !coord_set.empty() ) {
+        viewport_was_active = true;
+        viewport_saved_zoom = g->get_zoom();
+
+        zone_sorting::viewport_bbox bbox = zone_sorting::calc_zone_bbox( coord_set );
+        int target = zone_sorting::calc_target_zoom(
+                         bbox.width(), bbox.height(),
+                         TERRAIN_WINDOW_WIDTH, TERRAIN_WINDOW_HEIGHT,
+                         viewport_saved_zoom, viewport_saved_zoom );
+
+        avatar::zone_sort_viewport_t &vp = you.as_avatar()->zone_sort_viewport;
+        vp.active = true;
+        vp.center = bbox.centroid;
+        vp.target_zoom = target;
+        vp.bbox_min = bbox.min_corner;
+        vp.bbox_max = bbox.max_corner;
+        if( !test_mode ) {
+            g->set_zoom( target );
+            g->mark_main_ui_adaptor_resize();
+        }
+    }
+
     stage = THINK;
 }
 
@@ -13433,6 +13555,28 @@ void zone_sort_activity_actor::stage_do( player_activity &act, Character &you )
             if( !drag_worst_tile ) {
                 drag_worst_tile = zone_sorting::worst_drag_tile_on_route( you, dropoff_coords );
             }
+            // Expand viewport bbox to include newly discovered destinations.
+            if( you.is_avatar() && you.as_avatar()->zone_sort_viewport.active ) {
+                avatar::zone_sort_viewport_t &vp = you.as_avatar()->zone_sort_viewport;
+                bool grew = false;
+                for( const tripoint_abs_ms &d : dropoff_coords ) {
+                    grew |= zone_sorting::expand_bbox_raw( vp.bbox_min, vp.bbox_max, d );
+                }
+                if( grew ) {
+                    const int bbox_w = vp.bbox_max.x() - vp.bbox_min.x();
+                    const int bbox_h = vp.bbox_max.y() - vp.bbox_min.y();
+                    vp.center.x() = ( vp.bbox_min.x() + vp.bbox_max.x() ) / 2;
+                    vp.center.y() = ( vp.bbox_min.y() + vp.bbox_max.y() ) / 2;
+                    vp.target_zoom = zone_sorting::calc_target_zoom(
+                                         bbox_w, bbox_h,
+                                         TERRAIN_WINDOW_WIDTH, TERRAIN_WINDOW_HEIGHT,
+                                         g->get_zoom(), viewport_saved_zoom );
+                    if( !test_mode ) {
+                        g->set_zoom( vp.target_zoom );
+                        g->mark_main_ui_adaptor_resize();
+                    }
+                }
+            }
         }
 
         item_location thisitem_loc;
@@ -13929,6 +14073,8 @@ void zone_sort_activity_actor::serialize( JsonOut &jsout ) const
     jsout.member( "dropoff_coords", dropoff_coords );
     jsout.member( "pickup_failure_reported", pickup_failure_reported );
     jsout.member( "virtual_pickup_active", virtual_pickup_active );
+    jsout.member( "viewport_was_active", viewport_was_active );
+    jsout.member( "viewport_saved_zoom", viewport_saved_zoom );
 
     jsout.end_object();
 }
@@ -13953,6 +14099,12 @@ std::unique_ptr<activity_actor> zone_sort_activity_actor::deserialize( JsonValue
     }
     if( data.has_member( "virtual_pickup_active" ) ) {
         data.read( "virtual_pickup_active", actor.virtual_pickup_active );
+    }
+    if( data.has_member( "viewport_was_active" ) ) {
+        data.read( "viewport_was_active", actor.viewport_was_active );
+    }
+    if( data.has_member( "viewport_saved_zoom" ) ) {
+        data.read( "viewport_saved_zoom", actor.viewport_saved_zoom );
     }
     return actor.clone();
 }

@@ -17,6 +17,7 @@
 #include "activity_actor.h"
 #include "activity_actor_definitions.h"
 #include "addiction.h"
+#include "clone_ptr.h"
 #include "anatomy.h"
 #include "avatar.h"
 #include "avatar_action.h"
@@ -116,6 +117,7 @@ static const activity_id ACT_HAND_CRANK( "ACT_HAND_CRANK" );
 static const activity_id ACT_HEATING( "ACT_HEATING" );
 static const activity_id ACT_MEDITATE( "ACT_MEDITATE" );
 static const activity_id ACT_MOVE_ITEMS( "ACT_MOVE_ITEMS" );
+static const activity_id ACT_MOVE_LOOT( "ACT_MOVE_LOOT" );
 static const activity_id ACT_OPERATION( "ACT_OPERATION" );
 static const activity_id ACT_READ( "ACT_READ" );
 static const activity_id ACT_SOCIALIZE( "ACT_SOCIALIZE" );
@@ -249,6 +251,7 @@ static const json_character_flag json_flag_INFECTION_IMMUNE( "INFECTION_IMMUNE" 
 static const json_character_flag json_flag_INSECTBLOOD( "INSECTBLOOD" );
 static const json_character_flag json_flag_INVERTEBRATEBLOOD( "INVERTEBRATEBLOOD" );
 static const json_character_flag json_flag_INVISIBLE( "INVISIBLE" );
+static const json_character_flag json_flag_LEVITATION( "LEVITATION" );
 static const json_character_flag json_flag_MYOPIC( "MYOPIC" );
 static const json_character_flag json_flag_MYOPIC_IN_LIGHT( "MYOPIC_IN_LIGHT" );
 static const json_character_flag
@@ -263,6 +266,7 @@ static const json_character_flag json_flag_PRED4( "PRED4" );
 static const json_character_flag json_flag_PSYCHOPATH( "PSYCHOPATH" );
 static const json_character_flag json_flag_SAPIOVORE( "SAPIOVORE" );
 static const json_character_flag json_flag_SEESLEEP( "SEESLEEP" );
+static const json_character_flag json_flag_SNOWWALKING( "SNOWWALKING" );
 static const json_character_flag json_flag_STEADY( "STEADY" );
 static const json_character_flag json_flag_SUPER_CLAIRVOYANCE( "SUPER_CLAIRVOYANCE" );
 static const json_character_flag json_flag_TOUGH_FEET( "TOUGH_FEET" );
@@ -1513,6 +1517,11 @@ void Character::clear_destination_activity()
 }
 
 player_activity Character::get_destination_activity() const
+{
+    return destination_activity;
+}
+
+const player_activity &Character::peek_destination_activity() const
 {
     return destination_activity;
 }
@@ -6123,7 +6132,8 @@ std::vector<run_cost_effect> Character::run_cost_effects( float &movecost ) cons
     // Snow depth movement penalty (outdoor, unroofed tiles only)
     if( here.is_outside( pos_bub() ) && !here.is_roofed( pos_bub() ) ) {
         const double snow_mm = get_weather().get_snow_depth_mm( pos_abs_omt() );
-        if( snow_mm >= 100 ) {
+        if( snow_mm >= 100 && !has_flag( json_flag_LEVITATION )
+            && !has_flag( json_flag_SNOWWALKING ) ) {
             const int penalty = snow_mm >= 500 ? 100 : ( snow_mm >= 250 ? 50 : 20 );
             run_cost_effect_add( penalty, _( "Snow" ) );
         }
@@ -7107,6 +7117,25 @@ void Character::clear_destination()
 
 void Character::abort_automove()
 {
+    // Restore zone sort viewport lock state before clearing destination.
+    // The actor in destination_activity has the authoritative saved_zoom.
+    const bool had_visual_lock = is_avatar() && as_avatar()->zone_sort_viewport.active;
+    const player_activity &dest = peek_destination_activity();
+    if( !dest.is_null() && dest.id() == ACT_MOVE_LOOT ) {
+        if( const auto *a = dynamic_cast<const zone_sort_activity_actor *>(
+                                dest.actor.get() ) ) {
+            if( a->viewport_was_active || had_visual_lock ) {
+                if( !test_mode ) {
+                    g->set_zoom( a->viewport_saved_zoom );
+                    g->mark_main_ui_adaptor_resize();
+                }
+            }
+        }
+    }
+    if( had_visual_lock ) {
+        as_avatar()->zone_sort_viewport = {};
+    }
+
     clear_destination();
     if( g->overmap_data.fast_traveling && is_avatar() ) {
         ui::omap::force_quit();
