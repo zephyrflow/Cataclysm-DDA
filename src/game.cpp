@@ -180,6 +180,7 @@
 #include "proficiency.h"
 #include "recipe.h"
 #include "recipe_dictionary.h"
+#include "regional_settings.h"
 #include "ret_val.h"
 #include "rng.h"
 #include "safemode_ui.h"
@@ -267,6 +268,7 @@ static const efftype_id effect_no_sight( "no_sight" );
 static const efftype_id effect_onfire( "onfire" );
 static const efftype_id effect_pet( "pet" );
 static const efftype_id effect_psi_stunned( "psi_stunned" );
+static const efftype_id effect_revived_marker( "revived_marker" );
 static const efftype_id effect_ridden( "ridden" );
 static const efftype_id effect_riding( "riding" );
 static const efftype_id effect_stunned( "stunned" );
@@ -845,7 +847,7 @@ bool game::start_game()
     overmap_buffer.reveal( u.pos_abs_omt().xy(),
                            get_scenario()->get_distance_initial_visibility(), 0 );
 
-    const int city_size = get_option<int>( "CITY_SIZE" );
+    const int city_size = overmap_buffer.get_settings( u.pos_abs_omt() ).get_settings_city().city_size;
     if( get_scenario()->get_reveal_locale() && city_size > 0 ) {
         city_reference nearest_city = overmap_buffer.closest_city( here.get_abs_sub() );
         const tripoint_abs_omt city_center_omt = project_to<coords::omt>( nearest_city.abs_sm_pos );
@@ -4918,8 +4920,12 @@ bool game::revive_corpse( const tripoint_bub_ms &p, item &it, int radius )
     }
 
     if( it.get_var( "times_combatted", 0.0 ) > 0.0 ) {
-        critter.times_combatted_player = it.get_var( "times_combatted", 0.0 );
+        critter.times_combatted_player = std::numeric_limits<short>::max();
     }
+
+    // Add a permanent effect marking this as a revived creature. Everytime they revive they will have this effect forever.
+    critter.add_effect( effect_source(), effect_revived_marker, calendar::INDEFINITELY_LONG_DURATION,
+                        true );
 
     return place_critter_around( newmon_ptr, tripoint_bub_ms( p ), radius );
 }
