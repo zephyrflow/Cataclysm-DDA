@@ -8518,6 +8518,7 @@ bool game::phasing_move( const tripoint_bub_ms &dest_loc, const bool via_ramp )
         u.grab( object_type::NONE );
         on_move_effects();
         here.creature_on_trap( u );
+        get_event_bus().send<event_type::phase_move>( tunneldist, true );
         return true;
     }
 
@@ -8534,7 +8535,8 @@ bool game::phasing_move_enchant( const tripoint_bub_ms &dest_loc, const int phas
     }
 
     // phasing only applies to impassible tiles such as walls
-
+    // enforce a height cost for z level changes
+    const int z_level_height = 4;
     int tunneldist = 0;
     tripoint_bub_ms dest = dest_loc;
     const tripoint_rel_ms d( sgn( dest.x() - pos.x() ), sgn( dest.y() - pos.y() ),
@@ -8543,8 +8545,7 @@ bool game::phasing_move_enchant( const tripoint_bub_ms &dest_loc, const int phas
 
     while( here.impassable( dest ) ||
            ( creatures.creature_at( dest ) != nullptr && tunneldist > 0 ) ) {
-        // add 1 to tunnel distance for each impassable tile in the line
-        tunneldist += 1;
+        tunneldist += d.z() != 0 ? z_level_height : 1;
         if( tunneldist > phase_distance ) {
             return false;
         }
@@ -8556,10 +8557,10 @@ bool game::phasing_move_enchant( const tripoint_bub_ms &dest_loc, const int phas
 
     // vertical handling for adjacent tiles
     if( d.z() != 0 && !here.impassable( dest_loc ) && tunneldist == 0 ) {
-        tunneldist += 1;
+        tunneldist += z_level_height;
     }
 
-    if( tunneldist != 0 ) {
+    if( tunneldist != 0 && tunneldist <= phase_distance ) {
         if( u.in_vehicle ) {
             here.unboard_vehicle( pos );
         }
@@ -8569,6 +8570,10 @@ bool game::phasing_move_enchant( const tripoint_bub_ms &dest_loc, const int phas
             vertical_shift( dest.z() );
         }
 
+        const bool is_diagonal = d.x() != 0 && d.y() != 0;
+        const int phase_move_cost = u.run_cost( 100, is_diagonal );
+        u.mod_moves( -phase_move_cost );
+        u.burn_move_stamina( phase_move_cost );
         u.setpos( here, dest );
 
         if( here.veh_at( pos ).part_with_feature( "BOARDABLE", true ) ) {
@@ -8578,6 +8583,8 @@ bool game::phasing_move_enchant( const tripoint_bub_ms &dest_loc, const int phas
         u.grab( object_type::NONE );
         on_move_effects();
         here.creature_on_trap( u );
+
+        get_event_bus().send<event_type::phase_move>( tunneldist, false );
         return true;
     }
 
@@ -8946,7 +8953,7 @@ void game::on_move_effects()
     if( u.is_running() ) {
         // If mounted, don't break trot
         if( !u.is_mounted() && !u.can_run() ) {
-            u.toggle_run_mode();
+            u.reset_move_mode();
         }
         if( u.get_stamina() <= 0 ) {
             u.add_effect( effect_winded, 10_turns );
@@ -9684,8 +9691,11 @@ bool game::travel_to_dimension( const std::string &new_prefix,
 {
     map &here = get_map();
     avatar &player = get_avatar();
+    std::vector<npc_ptr> moving_npcs;
+    moving_npcs.reserve( npc_travellers.size() );
     if( !npc_travellers.empty() ) {
         int traveller_count = npc_travellers.size();
+        overmap &old_om = overmap_buffer.get( project_to<coords::om>( player.pos_abs().xy() ) );
         for( auto it = critter_tracker->active_npc.begin(); it != critter_tracker->active_npc.end(); ) {
             // skip unloading a traveller
             bool skip = false;
@@ -9702,7 +9712,9 @@ bool game::travel_to_dimension( const std::string &new_prefix,
                 ( *it )->on_unload();
                 it = critter_tracker->active_npc.erase( it );
             } else {
-                it++;
+                if( const npc_ptr ptr = old_om.erase_npc( ( *it++ )->getID() ) ) {
+                    moving_npcs.push_back( ptr );
+                }
             }
         }
     } else {
@@ -9751,7 +9763,11 @@ bool game::travel_to_dimension( const std::string &new_prefix,
     // Clear the overmap
     overmap_buffer.clear();
     // load/create new overmap
-    overmap_buffer.get( point_abs_om{} );
+    overmap &new_om = overmap_buffer.get( project_to<coords::om>( player.pos_abs().xy() ) );
+    // insert travelled NPCs
+    for( const npc_ptr &guy : moving_npcs ) {
+        new_om.insert_npc( guy );
+    }
     // clear map memory from the previous dimension
     player.clear_map_memory();
     // Load map memory in new dimension, if there is any

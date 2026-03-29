@@ -1800,7 +1800,7 @@ class try_sleep_activity_actor : public activity_actor
     public:
         /*
          * @param dur Total duration, from when the character starts
-         * trying to fall asleep toexplicit explicit  when they're supposed to wake up
+         * trying to fall asleep toexplicit explicit when they're supposed to wake up
          */
         explicit try_sleep_activity_actor( const time_duration &dur ) : duration( dur ) {}
 
@@ -2367,7 +2367,7 @@ class insert_item_activity_actor : public activity_actor
         contents_change_handler handler;
         bool all_pockets_rigid;
         bool reopen_menu;
-        // allow put charge items into holster's nested  pocket
+        // allow put charge items into holster's nested pocket
         bool allow_fill_count_by_charge_item_nested;
 
     public:
@@ -4116,6 +4116,7 @@ class zone_sort_activity_actor : public zone_activity_actor
         // Place(s) that the current stuff can be dropped off at.
         std::vector<tripoint_abs_ms> dropoff_coords;
         bool pickup_failure_reported = false;
+        bool spillable_skip_reported = false; // NOLINT(cata-serialize)
         // Tracks whether current batch used virtual pickup (items left on cart).
         // Batch-scoped: captured and cleared in pre-loop section of stage_do.
         bool virtual_pickup_active = false;
