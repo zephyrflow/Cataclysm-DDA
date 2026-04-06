@@ -397,9 +397,8 @@ input_context game::get_player_input( std::string &action )
                 }
             }
 
-            if( pixel_minimap_option ) {
-                // TODO: more granular control to only redraw pixel minimap
-                invalidate_main_ui_adaptor();
+            if( pixel_minimap_option && g->w_pixel_minimap ) {
+                wnoutrefresh( g->w_pixel_minimap );
             }
 
             std::unique_ptr<static_popup> deathcam_msg_popup;
@@ -412,14 +411,26 @@ input_context game::get_player_input( std::string &action )
 
             // Remove asynchronous animations after animation delay if no input
             if( current_turn.async_anim_timeout() ) {
-                g->void_async_anim_curses();
+                bool cleared = g->void_async_anim_curses();
 #if defined(TILES)
-                tilecontext->void_async_anim();
-#else
-                // Curses does not redraw itself so do it here
-                g->invalidate_main_ui_adaptor();
+                cleared |= tilecontext->void_async_anim();
 #endif
+                if( cleared ) {
+                    invalidate_main_ui_adaptor();
+                }
             }
+
+#if defined(TILES)
+            // Expire stale hit-animation overlays between draws
+            if( tilecontext->expire_hit_animations() ) {
+                invalidate_main_ui_adaptor();
+            }
+
+            // Animated tiles need periodic redraws to cycle frames
+            if( tilecontext->has_animated_tiles() ) {
+                invalidate_main_ui_adaptor();
+            }
+#endif
 
             if( g->has_blink_curses() && current_turn.blink_timeout() ) {
                 // Toggle blink phase and redraw

@@ -226,7 +226,9 @@ class avatar : public Character
 
         // Dialogue and bartering--see npctalk.cpp
         void talk_to( std::unique_ptr<talker> talk_with, bool radio_contact = false,
-                      bool is_computer = false, bool is_not_conversation = false, const std::string &debug_topic = "" );
+                      bool is_computer = false, bool is_not_conversation = false,
+                      const std::string &debug_topic = "",
+                      const std::string &remote_name = "" );
 
         /**
          * Try to disarm the NPC. May result in fail attempt, you receiving the weapon and instantly wielding it,
@@ -308,6 +310,9 @@ class avatar : public Character
 
         // Set in npc::talk_to_you for use in further NPC interactions
         bool dialogue_by_radio = false;
+        // When set, overrides the NPC display name in dialogue and trade
+        // windows (e.g. "the intercom" for remote intercom conversations).
+        std::string dialogue_remote_name;
         // Preferred aim mode - ranged.cpp aim mode defaults to this if possible
         std::string preferred_aiming_mode;
 
@@ -400,6 +405,8 @@ class avatar : public Character
         void log_activity_level( float level ) override;
         std::string total_daily_calories_string() const;
         //set 0-3 random hobbies, with 1 and 2 being twice as likely as 0 and 3
+        std::set<character_id> get_followers() const;
+        std::set<character_id> get_known_faction_representatives() const;
 
         int movecounter = 0;
 
@@ -414,6 +421,7 @@ class avatar : public Character
         vproto_id starting_vehicle = vproto_id::NULL_ID();
         std::vector<mtype_id> starting_pets;
         std::set<character_id> follower_ids;
+        std::set<character_id> faction_representatives;
 
         mutable bool aim_cache_dirty = true;
 

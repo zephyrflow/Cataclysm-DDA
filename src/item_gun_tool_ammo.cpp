@@ -1455,10 +1455,12 @@ int item::remaining_ammo_capacity() const
 
     const itype *loaded_ammo = ammo_data();
     if( loaded_ammo == nullptr ) {
-        return ammo_capacity( item::find_type( ammo_default() )->ammo->type ) - ammo_remaining( );
-    } else {
-        return ammo_capacity( loaded_ammo->ammo->type ) - ammo_remaining( );
+        loaded_ammo = item::find_type( ammo_default() );
     }
+    if( !loaded_ammo || !loaded_ammo->ammo ) {
+        return 0;
+    }
+    return ammo_capacity( loaded_ammo->ammo->type ) - ammo_remaining( );
 }
 
 int item::ammo_capacity( const ammotype &ammo, bool include_linked ) const
@@ -1977,7 +1979,17 @@ item *item::magazine_current()
 
 const item *item::magazine_current() const
 {
-    return const_cast<item *>( this )->magazine_current();
+    return contents.magazine_current();
+}
+
+std::vector<item *> item::magazines_current()
+{
+    return contents.magazines_current();
+}
+
+std::vector<const item *> item::magazines_current() const
+{
+    return contents.magazines_current();
 }
 
 std::vector<item *> item::gunmods()

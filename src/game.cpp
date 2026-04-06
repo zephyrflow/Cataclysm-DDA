@@ -711,7 +711,6 @@ void game::setup()
     achievements_tracker_ptr->clear();
     eoc_events_ptr->clear();
     // reset follower list
-    follower_ids.clear();
     scent.reset();
     effect_on_conditions::clear( u );
     u.character_mood_face( true );
@@ -838,6 +837,12 @@ bool game::start_game()
     load_map( lev, /*pump_events=*/true );
 
     start_loc.place_player( u, omtstart );
+    // Set spawn location for starting items (maps need it to be readable)
+    const tripoint_abs_ms player_pos = u.pos_abs();
+    u.visit_items( [&player_pos]( item * it, item * ) {
+        it->preserve_location( player_pos );
+        return VisitResponse::NEXT;
+    } );
     map &here = reality_bubble();
     int level = here.get_abs_sub().z();
     // Rebuild map cache because we want visibility cache to avoid spawning monsters in sight
@@ -1723,13 +1728,11 @@ npc *game::find_npc_by_unique_id( const std::string &unique_id )
 
 void game::add_npc_follower( const character_id &id )
 {
-    follower_ids.insert( id );
     u.follower_ids.insert( id );
 }
 
 void game::remove_npc_follower( const character_id &id )
 {
-    follower_ids.erase( id );
     u.follower_ids.erase( id );
 }
 
@@ -1819,7 +1822,7 @@ void game::validate_camps()
 
 std::set<character_id> game::get_follower_list()
 {
-    return follower_ids;
+    return get_avatar().get_followers();
 }
 
 static hint_rating rate_action_change_side( const avatar &you, const item &it )
@@ -2893,7 +2896,6 @@ void game::death_screen()
     u.get_avatar_diary()->death_entry();
     show_scores_ui();
     disp_NPC_epilogues();
-    follower_ids.clear();
     display_faction_epilogues();
 }
 
@@ -2911,7 +2913,7 @@ std::string game::timestamp_now()
 
 void game::reset_npc_dispositions()
 {
-    for( character_id elem : follower_ids ) {
+    for( character_id elem : get_follower_list() ) {
         shared_ptr_fast<npc> npc_to_get = overmap_buffer.find_npc( elem );
         if( !npc_to_get )  {
             continue;
@@ -2988,7 +2990,7 @@ power_network_manager &game::power_networks()
 void game::disp_NPC_epilogues()
 {
     // TODO: This search needs to be expanded to all NPCs
-    for( character_id elem : follower_ids ) {
+    for( character_id elem : get_follower_list() ) {
         shared_ptr_fast<npc> guy = overmap_buffer.find_npc( elem );
         if( !guy ) {
             continue;
@@ -3264,9 +3266,13 @@ void game::draw_async_anim_curses()
     }
 }
 
-void game::void_async_anim_curses()
+bool game::void_async_anim_curses()
 {
+    if( async_anim_layer_curses.empty() ) {
+        return false;
+    }
     async_anim_layer_curses.clear();
+    return true;
 }
 
 void game::init_draw_blink_curses( const tripoint_bub_ms &p, const std::string &ncstr,
@@ -9687,6 +9693,8 @@ void game::vertical_move( int movez, bool force, bool peeking )
 bool game::travel_to_dimension( const std::string &new_prefix,
                                 const std::string &region_type,
                                 const std::vector<npc *> &npc_travellers,
+                                const std::vector<item_location> &item_travellers,
+                                const std::optional<tripoint_bub_ms> item_travellers_location,
                                 vehicle *veh )
 {
     map &here = get_map();
@@ -9720,6 +9728,17 @@ bool game::travel_to_dimension( const std::string &new_prefix,
     } else {
         unload_npcs();
     }
+
+    std::vector<item> place_items;
+    place_items.reserve( item_travellers.size() );
+    for( item_location il : item_travellers ) {
+        item *it = il.get_item();
+        if( it ) {
+            place_items.push_back( *it );
+            il.remove_item();
+        }
+    }
+
     for( monster &critter : all_monsters() ) {
         despawn_monster( critter );
     }
@@ -9786,6 +9805,12 @@ bool game::travel_to_dimension( const std::string &new_prefix,
         here.board_vehicle( player.pos_bub(), &player );
         player.controlling_vehicle = controlling_vehicle;
     }
+    if( !place_items.empty() && !undo_shift ) {
+        tripoint_bub_ms item_center = item_travellers_location.value_or( player.pos_bub( here ) );
+        for( const item &it : place_items ) {
+            here.add_item_or_charges( item_center, it );
+        }
+    }
     load_npcs();
     // Handle static monsters
     here.spawn_monsters( true, true );
@@ -9794,7 +9819,13 @@ bool game::travel_to_dimension( const std::string &new_prefix,
     weather.set_nextweather( calendar::turn );
     update_overmap_seen();
     if( undo_shift ) {
-        travel_to_dimension( old_prefix, region_type, npc_travellers, veh );
+        travel_to_dimension( old_prefix, region_type, npc_travellers, {}, std::nullopt, veh );
+        if( !place_items.empty() ) {
+            tripoint_bub_ms item_center = item_travellers_location.value_or( player.pos_bub( here ) );
+            for( const item &it : place_items ) {
+                here.add_item_or_charges( item_center, it );
+            }
+        }
     }
     game::mon_info_update();
     get_event_bus().send<event_type::dimension_travel>( player.getID(), old_prefix, dimension_prefix );

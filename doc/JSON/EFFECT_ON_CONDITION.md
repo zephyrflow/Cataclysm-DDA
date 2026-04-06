@@ -1986,6 +1986,21 @@ Opens the menu to swap the avatar
 "effect": [ "take_control_menu" ]
 ```
 
+#### `u_make_radio_representative` `npc_make_radio_representative`
+Sets alpha or beta talker as faction representative, allowing avatar to contact them, if both NPC and avatar has a charged radio
+It will open `talk_radio` dialogue, so remember to change the topic of NPC you want to make a representative, otherwise the default `TALK_RADIO` will be set, used for your followers
+
+##### Valid talkers:
+
+| Avatar | NPC | Monster | Furniture | Item | Vehicle |
+| ------ | --------- | ---- | ------- | --- | ---- |
+| ❌ | ✔️ | ❌ | ❌ | ❌ | ❌ |
+
+##### Examples
+Sets NPC to be faction representative
+```jsonc
+"effect": [ "npc_make_radio_representative" ]
+```
 
 #### `give_achievement`
 Marks the given achievement as complete
@@ -4547,6 +4562,8 @@ Unloads the current dimension and loads the dimension with the specific ID, opti
 | "u_travel_to_dimension" | **mandatory** | string | Will teleport the player to a dimension with the ID. |
 | "npc_travel_radius" | optional | int or [variable object](#variable-object) | default 0; if a value above 0 is specified, the NPCs within that radius around the player will be transported with them when dimension hopping. |
 | "npc_travel_filter" | optional | string or [variable object](#variable-object) | default `all`; Acceps the following values: `all`, `follower`, `enemy`. Does nothing if `npc_travel_radius` is 0. |
+| "item_travel_radius" | optional | int or [variable object](#variable-object) | default -1; if a value 0 or above is specified, the items within that radius around the player will be transported with them when dimension hopping. |
+| "target_location" | optional | [variable object](#variable-object) | default is the player's location; if present this variable will be used as the center point for items in conjunction with `item_travel_radius` |
 | "region_type" | optional | string or [variable object](#variable-object) | default `default`; The dimension is generated with the region settings of a `region_settings_new` object. |
 
 ##### Valid talkers:

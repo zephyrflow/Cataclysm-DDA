@@ -294,7 +294,7 @@ class game
         void init_draw_async_anim_curses( const tripoint_bub_ms &p, const std::string &ncstr,
                                           const nc_color &nccol );
         void draw_async_anim_curses();
-        void void_async_anim_curses();
+        bool void_async_anim_curses();
     protected:
         std::map<tripoint_bub_ms, std::pair <std::string, nc_color>>
                 async_anim_layer_curses; // NOLINT(cata-serialize)
@@ -339,7 +339,10 @@ class game
          * @param veh pointer to a vehicle to bring along.
          */
         bool travel_to_dimension( const std::string &prefix, const std::string &region_type,
-                                  const std::vector<npc *> &npc_travellers, vehicle *veh = nullptr );
+                                  const std::vector<npc *> &npc_travellers,
+                                  const std::vector<item_location> &item_travellers,
+                                  std::optional<tripoint_bub_ms> item_travellers_location,
+                                  vehicle *veh = nullptr );
         /**
          * Retrieve the identifier of the current dimension.
          * TODO: this should be a dereferencable id that gives properties of the dimension.
@@ -1257,8 +1260,6 @@ class game
         character_id next_npc_id; // NOLINT(cata-serialize)
         int next_mission_id = 0; // NOLINT(cata-serialize)
         int64_t next_item_uid = 1; // NOLINT(cata-serialize)
-        // Keep track of follower NPC IDs
-        std::set<character_id> follower_ids; // NOLINT(cata-serialize)
 
         std::chrono::seconds time_played_at_last_load; // NOLINT(cata-serialize)
         // NOLINTNEXTLINE(cata-serialize)
