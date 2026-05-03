@@ -137,6 +137,7 @@ static const itype_id itype_radiocontrol( "radiocontrol" );
 static const json_character_flag json_flag_ALARMCLOCK( "ALARMCLOCK" );
 static const json_character_flag json_flag_BIONIC_SLEEP_FRIENDLY( "BIONIC_SLEEP_FRIENDLY" );
 static const json_character_flag json_flag_CANNOT_ATTACK( "CANNOT_ATTACK" );
+static const json_character_flag json_flag_HANDS_CANNOT_USE_FIREARMS( "HANDS_CANNOT_USE_FIREARMS" );
 static const json_character_flag json_flag_LEVITATION( "LEVITATION" );
 static const json_character_flag json_flag_PHASE_MOVEMENT( "PHASE_MOVEMENT" );
 static const json_character_flag json_flag_SUBTLE_SPELL( "SUBTLE_SPELL" );
@@ -398,6 +399,12 @@ input_context game::get_player_input( std::string &action )
             }
 
             if( pixel_minimap_option && g->w_pixel_minimap ) {
+#if defined(TILES)
+                // Mark minimap dirty so beacon colors keep cycling
+                if( tilecontext->has_blinking_minimap() ) {
+                    werase( g->w_pixel_minimap );
+                }
+#endif
                 wnoutrefresh( g->w_pixel_minimap );
             }
 
@@ -1813,6 +1820,14 @@ static void fire()
         add_msg( m_bad, _( "You refuse to use firearms." ) );
         return;
     }
+    if( you.has_flag( json_flag_TEMPORARY_SHAPESHIFT_NO_HANDS ) ) {
+        add_msg( m_bad, _( "You have no hands and cannot use ranged weapons!" ) );
+        return;
+    }
+    if( you.has_flag( json_flag_HANDS_CANNOT_USE_FIREARMS ) && weapon && weapon->is_firearm() ) {
+        add_msg( m_bad, _( "Your hands aren't suited for using firearms!" ) );
+        return;
+    }
     // try firing gun
     if( weapon && weapon->is_gun() && !weapon->gun_current_mode().melee() ) {
         avatar_action::fire_wielded_weapon( you );
@@ -3147,19 +3162,16 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
         case ACTION_TOGGLE_THIEF_MODE:
             if( player_character.get_value( "THIEF_MODE" ).str() == "THIEF_ASK" ) {
                 player_character.set_value( "THIEF_MODE", "THIEF_HONEST" );
-                player_character.set_value( "THIEF_MODE_KEEP", "YES" );
                 //~ Thief mode cycled between THIEF_ASK/THIEF_HONEST/THIEF_STEAL
-                add_msg( _( "You will not pick up other peoples belongings." ) );
+                add_msg( _( "Thief mode: Always Honest - you will not pick up others' belongings." ) );
             } else if( player_character.get_value( "THIEF_MODE" ).str() == "THIEF_HONEST" ) {
                 player_character.set_value( "THIEF_MODE", "THIEF_STEAL" );
-                player_character.set_value( "THIEF_MODE_KEEP", "YES" );
                 //~ Thief mode cycled between THIEF_ASK/THIEF_HONEST/THIEF_STEAL
-                add_msg( _( "You will pick up also those things that belong to others!" ) );
+                add_msg( _( "Thief mode: Always Steal - you will pick up others' belongings without prompting." ) );
             } else if( player_character.get_value( "THIEF_MODE" ).str() == "THIEF_STEAL" ) {
                 player_character.set_value( "THIEF_MODE", "THIEF_ASK" );
-                player_character.set_value( "THIEF_MODE_KEEP", "NO" );
                 //~ Thief mode cycled between THIEF_ASK/THIEF_HONEST/THIEF_STEAL
-                add_msg( _( "You will be reminded not to steal." ) );
+                add_msg( _( "Thief mode: Default - you will be prompted when picking up owned items." ) );
             } else {
                 // ERROR
                 add_msg( _( "THIEF_MODE CONTAINED BAD VALUE [ %s ]!" ),

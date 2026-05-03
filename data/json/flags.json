@@ -197,6 +197,11 @@
     "info": "This item enables you to keep track of calorie consumption.  Includes CALORIES_INTAKE."
   },
   {
+    "id": "CRYOGENIC_ROT",
+    "type": "json_flag",
+    "info": "This item <info>requires specialized cryogenic preservation</info> and will <bad>spoil rapidly</bad> even at subzero temperatures."
+  },
+  {
     "id": "CASELESS_ROUNDS",
     "type": "json_flag",
     "info": "Being caseless rounds, these <bad>cannot be disassembled or reloaded</bad>."
@@ -1030,6 +1035,11 @@
     "info": "This clothing <good>performs well</good> even when <info>soaking wet</info>.  This can feel good."
   },
   {
+    "id": "HIGH_GLARE",
+    "type": "json_flag",
+    "//": "Glare lasts twice as long."
+  },
+  {
     "id": "ITEM_BROKEN",
     "type": "json_flag",
     "info": "This item was broken and <bad>won't activate anymore</bad>."
@@ -1273,6 +1283,11 @@
     "id": "INTANGIBLE_ARMOR",
     "type": "json_flag",
     "//": "Prevents armor from protecting the character."
+  },
+  {
+    "id": "HANDS_CANNOT_USE_FIREARMS",
+    "type": "json_flag",
+    "//": "Due to mutation, your hands (or paws etc) are not suitable to use firearms."
   },
   {
     "id": "NON_THRESH",
@@ -2867,6 +2882,14 @@
     "id": "CANNOT_GAIN_EFFECTS",
     "type": "json_flag",
     "//": "Creatures with this flag will not gain any new effects or gain extra time on their current ones."
+  },
+  {
+    "id": "NUMB",
+    "type": "json_flag"
+  },
+  {
+    "id": "PSYCHOPATH",
+    "type": "json_flag"
   },
   {
     "id": "BANK_NETWORKED",

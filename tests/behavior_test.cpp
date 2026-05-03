@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "basecamp.h"
 #include "behavior.h"
 #include "behavior_oracle.h"
 #include "behavior_strategy.h"
@@ -40,6 +41,7 @@
 #include "npc.h"
 #include "npc_class.h"
 #include "options_helpers.h"
+#include "overmapbuffer.h"
 #include "player_helpers.h"
 #include "pocket_type.h"
 #include "point.h"
@@ -1390,16 +1392,21 @@ TEST_CASE( "npc_is_following_predicate", "[npc][behavior]" )
         guy.set_attitude( NPCATT_NULL );
         CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
     }
-    SECTION( "failure when follow_close not set" ) {
-        guy.set_attitude( NPCATT_FOLLOW );
-        guy.rules.clear_flag( ally_rule::follow_close );
+    SECTION( "failure when leader: leaders are not pulled toward player" ) {
+        guy.set_attitude( NPCATT_LEAD );
         CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
     }
-    SECTION( "failure when has guard_pos" ) {
+    SECTION( "fires even with follow_close cleared: rule controls spacing only" ) {
         guy.set_attitude( NPCATT_FOLLOW );
-        guy.rules.set_flag( ally_rule::follow_close );
+        guy.rules.clear_flag( ally_rule::follow_close );
+        get_player_character().setpos( here, tripoint_bub_ms( 60, 50, 0 ) );
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::running );
+    }
+    SECTION( "fires even with guard_pos: predicate reports state, not priority" ) {
+        guy.set_attitude( NPCATT_FOLLOW );
         guy.set_guard_pos( guy.pos_abs() + tripoint( 10, 0, 0 ) );
-        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
+        get_player_character().setpos( here, tripoint_bub_ms( 60, 50, 0 ) );
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::running );
     }
     SECTION( "failure when player in vehicle and NPC not" ) {
         guy.set_attitude( NPCATT_FOLLOW );
@@ -1470,10 +1477,17 @@ TEST_CASE( "npc_following_urgency_policy", "[npc][behavior]" )
         float hunger_score = oracle.hunger_urgency( "" );
         CHECK( follow_score > hunger_score );
     }
-    SECTION( "follow does not fire without follow_close" ) {
+    SECTION( "follow_close cleared: still fires, loose radius (6)" ) {
+        // follow_close rule controls preferred spacing, not whether-to-follow.
+        // Cleared rule = loose follow at radius 6.
         guy.rules.clear_flag( ally_rule::follow_close );
-        get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
+        get_player_character().setpos( here, tripoint_bub_ms( 55, 50, 0 ) );
+        REQUIRE( rl_dist( guy.pos_abs(), get_player_character().pos_abs() ) == 5 );
+        // Within loose radius -> 0 urgency (already in position).
         CHECK( oracle.npc_following_urgency( "" ) == Approx( 0.0f ) );
+        get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
+        // Beyond loose radius -> non-zero urgency.
+        CHECK( oracle.npc_following_urgency( "" ) > 0.0f );
     }
     SECTION( "follow capped below life-threatening needs" ) {
         get_player_character().setpos( here, tripoint_bub_ms( 100, 50, 0 ) );
@@ -1521,9 +1535,10 @@ TEST_CASE( "npc_decision_follow_tree", "[npc][behavior]" )
 TEST_CASE( "bt_goal_category_mapping_follow", "[npc][behavior]" )
 {
     CHECK( bt_goal_to_category( "follow_player" ) == decision_category::follow );
+    CHECK( bt_goal_to_category( "follow_embarked" ) == decision_category::follow );
 }
 
-TEST_CASE( "follow_and_duty_are_mutually_exclusive", "[npc][behavior]" )
+TEST_CASE( "npc_should_embark_predicate", "[npc][behavior]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -1531,10 +1546,58 @@ TEST_CASE( "follow_and_duty_are_mutually_exclusive", "[npc][behavior]" )
     npc &guy = spawn_npc( { 50, 50 }, "test_talker" );
     clear_character( guy );
     guy.set_fac( faction_your_followers );
+    guy.set_attitude( NPCATT_FOLLOW );
+    guy.rules.set_flag( ally_rule::follow_close );
+    behavior::character_oracle_t oracle( &guy );
+
+    SECTION( "fires: walking_with + player in vehicle + NPC not in vehicle" ) {
+        get_player_character().in_vehicle = true;
+        guy.in_vehicle = false;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::running );
+        CHECK( oracle.npc_embark_urgency( "" ) > 0.0f );
+        get_player_character().in_vehicle = false;
+    }
+    SECTION( "failure: not walking_with" ) {
+        guy.set_attitude( NPCATT_NULL );
+        get_player_character().in_vehicle = true;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::failure );
+        CHECK( oracle.npc_embark_urgency( "" ) == Approx( 0.0f ) );
+        get_player_character().in_vehicle = false;
+    }
+    SECTION( "failure: player not in vehicle" ) {
+        get_player_character().in_vehicle = false;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::failure );
+    }
+    SECTION( "fires while NPC is in vehicle: action handler routes to seat" ) {
+        get_player_character().in_vehicle = true;
+        guy.in_vehicle = true;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::running );
+        get_player_character().in_vehicle = false;
+        guy.in_vehicle = false;
+    }
+    SECTION( "follow predicate suppressed under embark conditions: predicates mutex" ) {
+        get_player_character().in_vehicle = true;
+        guy.in_vehicle = false;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::running );
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
+        get_player_character().in_vehicle = false;
+    }
+}
+
+TEST_CASE( "follow_suppresses_duty_when_recruited", "[npc][behavior]" )
+{
+    clear_map_without_vision();
+    map &here = get_map();
+    get_player_character().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    behavior::tree npc_decision;
+    npc_decision.add( &behavior_node_t_npc_decision.obj() );
+    npc &guy = spawn_npc( { 50, 50 }, "test_talker" );
+    clear_character( guy );
+    guy.set_fac( faction_your_followers );
     behavior::character_oracle_t oracle( &guy );
     calendar::turn = calendar::turn_zero + 12_hours;
 
-    SECTION( "guard_pos set: duty fires, follow fails" ) {
+    SECTION( "walking_with + guard_pos: follow fires, duty suppressed" ) {
         guy.set_attitude( NPCATT_FOLLOW );
         guy.rules.set_flag( ally_rule::follow_close );
         const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
@@ -1544,10 +1607,33 @@ TEST_CASE( "follow_and_duty_are_mutually_exclusive", "[npc][behavior]" )
         const auto &[wh_start, wh_end] = guy.myclass.obj().get_work_hours();
         REQUIRE( ( wh_start == 0 && wh_end == 24 ) );
         get_player_character().setpos( here, tripoint_bub_ms( 60, 50, 0 ) );
-        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::running );
-        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::running );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::failure );
+        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::failure );
+        CHECK( oracle.duty_urgency( "" ) == Approx( 0.0f ) );
+        CHECK( npc_decision.tick( &oracle ) == "follow_player" );
     }
-    SECTION( "no guard_pos: follow fires, duty fails" ) {
+    SECTION( "walking_with + guard_pos at-post: still follows player away" ) {
+        guy.set_attitude( NPCATT_FOLLOW );
+        guy.rules.set_flag( ally_rule::follow_close );
+        guy.set_guard_pos( guy.pos_abs() );
+        REQUIRE( guy.pos_abs() == *guy.get_guard_post() );
+        get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::failure );
+        CHECK( npc_decision.tick( &oracle ) == "follow_player" );
+    }
+    SECTION( "non-walking_with + guard_pos displaced: duty fires" ) {
+        guy.set_attitude( NPCATT_NULL );
+        const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
+        guy.set_guard_pos( post );
+        REQUIRE( guy.get_guard_post().has_value() );
+        REQUIRE_FALSE( guy.is_walking_with() );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::running );
+        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::running );
+        CHECK( oracle.duty_urgency( "" ) > 0.0f );
+        CHECK( npc_decision.tick( &oracle ) == "return_to_guard_pos" );
+    }
+    SECTION( "no guard_pos: follow fires, duty inert" ) {
         guy.set_attitude( NPCATT_FOLLOW );
         guy.rules.set_flag( ally_rule::follow_close );
         guy.guard_pos = std::nullopt;
@@ -1555,6 +1641,24 @@ TEST_CASE( "follow_and_duty_are_mutually_exclusive", "[npc][behavior]" )
         REQUIRE_FALSE( guy.get_guard_post().has_value() );
         get_player_character().setpos( here, tripoint_bub_ms( 60, 50, 0 ) );
         CHECK( oracle.npc_is_following( "" ) == behavior::status_t::running );
+        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::failure );
+        CHECK( oracle.duty_urgency( "" ) == Approx( 0.0f ) );
+    }
+    SECTION( "WAIT + guard_pos: duty suppressed" ) {
+        guy.set_attitude( NPCATT_WAIT );
+        const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
+        guy.set_guard_pos( post );
+        REQUIRE( guy.is_walking_with() );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::failure );
+        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::failure );
+        CHECK( oracle.duty_urgency( "" ) == Approx( 0.0f ) );
+    }
+    SECTION( "LEAD + guard_pos: duty suppressed" ) {
+        guy.set_attitude( NPCATT_LEAD );
+        const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
+        guy.set_guard_pos( post );
+        REQUIRE( guy.is_walking_with() );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::failure );
         CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::failure );
         CHECK( oracle.duty_urgency( "" ) == Approx( 0.0f ) );
     }
@@ -1651,9 +1755,16 @@ TEST_CASE( "bt_priority_matrix", "[npc][behavior]" )
         get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
         CHECK( bt_goal( guy ) == "follow_player" );
     }
-    SECTION( "guard_pos set: duty beats follow" ) {
+    SECTION( "guard_pos + walking_with: follow beats duty" ) {
         guy.set_attitude( NPCATT_FOLLOW );
         guy.rules.set_flag( ally_rule::follow_close );
+        const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
+        guy.set_guard_pos( post );
+        get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
+        CHECK( bt_goal( guy ) == "follow_player" );
+    }
+    SECTION( "guard_pos + not walking_with: duty fires" ) {
+        guy.set_attitude( NPCATT_NULL );
         const tripoint_abs_ms post = guy.pos_abs() + tripoint( 5, 0, 0 );
         guy.set_guard_pos( post );
         get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
@@ -1685,23 +1796,45 @@ TEST_CASE( "bt_priority_matrix", "[npc][behavior]" )
         guy.goto_to_this_pos = guy.pos_abs() + tripoint( 10, 0, 0 );
         CHECK( bt_goal( guy ) == "goto_ordered_position" );
     }
-    SECTION( "no follow_close rule: idle" ) {
+    SECTION( "follow_close cleared: still follows at loose radius" ) {
         guy.set_attitude( NPCATT_FOLLOW );
         guy.rules.clear_flag( ally_rule::follow_close );
         get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
+        CHECK( bt_goal( guy ) == "follow_player" );
+    }
+    SECTION( "follow_close cleared and within loose radius: idle" ) {
+        guy.set_attitude( NPCATT_FOLLOW );
+        guy.rules.clear_flag( ally_rule::follow_close );
+        get_player_character().setpos( here, tripoint_bub_ms( 55, 50, 0 ) );
+        REQUIRE( rl_dist( guy.pos_abs(), get_player_character().pos_abs() ) <= 6 );
         CHECK( bt_goal( guy ) == "idle" );
     }
-    SECTION( "player in vehicle, NPC not: no follow" ) {
+    SECTION( "player in vehicle, NPC not: BT picks follow_embarked" ) {
         guy.set_attitude( NPCATT_FOLLOW );
         guy.rules.set_flag( ally_rule::follow_close );
         get_player_character().setpos( here, tripoint_bub_ms( 70, 50, 0 ) );
         get_player_character().in_vehicle = true;
-        CHECK( bt_goal( guy ) != "follow_player" );
+        guy.in_vehicle = false;
+        CHECK( bt_goal( guy ) == "follow_embarked" );
         get_player_character().in_vehicle = false;
+    }
+    SECTION( "both in vehicle: BT keeps follow_embarked so handler can re-seat" ) {
+        guy.set_attitude( NPCATT_FOLLOW );
+        guy.rules.set_flag( ally_rule::follow_close );
+        get_player_character().in_vehicle = true;
+        guy.in_vehicle = true;
+        CHECK( bt_goal( guy ) == "follow_embarked" );
+        get_player_character().in_vehicle = false;
+        guy.in_vehicle = false;
     }
     SECTION( "camp resident idle: free_time" ) {
         guy.set_mission( NPC_MISSION_CAMP_RESIDENT );
-        guy.assigned_camp = project_to<coords::omt>( guy.pos_abs() );
+        const tripoint_abs_omt comt = project_to<coords::omt>( guy.pos_abs() );
+        here.add_camp( comt, "faction_camp" );
+        std::optional<basecamp *> cbcp = overmap_buffer.find_camp( comt.xy() );
+        REQUIRE( cbcp );
+        ( *cbcp )->define_camp( comt, "faction_base_bare_bones_NPC_camp_0", false );
+        guy.assigned_camp = comt;
         guy.guard_pos = std::nullopt;
         guy.clear_ai_guard_pos();
         CHECK( bt_goal( guy ) == "free_time" );
@@ -1751,7 +1884,15 @@ TEST_CASE( "bt_camp_resident_goals", "[npc][behavior]" )
     clear_character( guy, true );
     guy.set_fac( faction_your_followers );
     guy.set_mission( NPC_MISSION_CAMP_RESIDENT );
-    guy.assigned_camp = project_to<coords::omt>( guy.pos_abs() );
+
+    // Create a real camp so the BT predicates can resolve it.
+    const tripoint_abs_omt camp_omt = project_to<coords::omt>( guy.pos_abs() );
+    here.add_camp( camp_omt, "faction_camp" );
+    std::optional<basecamp *> bcp = overmap_buffer.find_camp( camp_omt.xy() );
+    REQUIRE( bcp );
+    ( *bcp )->define_camp( camp_omt, "faction_base_bare_bones_NPC_camp_0", false );
+
+    guy.assigned_camp = camp_omt;
     guy.guard_pos = std::nullopt;
     guy.clear_ai_guard_pos();
 
@@ -1773,6 +1914,63 @@ TEST_CASE( "bt_camp_resident_goals", "[npc][behavior]" )
         behavior::character_oracle_t oracle( &guy );
         REQUIRE( oracle.has_water( "" ) == behavior::status_t::running );
         CHECK( bt_goal( guy ) == "drink_water" );
+    }
+}
+
+TEST_CASE( "bt_camp_resident_expansion_tile", "[npc][behavior]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+
+    // Place camp at mid-map so we control OMT alignment.
+    const tripoint_bub_ms mid{ MAPSIZE_X / 2, MAPSIZE_Y / 2, 0 };
+    const tripoint_abs_omt camp_omt = project_to<coords::omt>( here.get_abs( mid ) );
+
+    here.add_camp( camp_omt, "faction_camp" );
+    std::optional<basecamp *> bcp = overmap_buffer.find_camp( camp_omt.xy() );
+    REQUIRE( bcp );
+    basecamp *test_camp = *bcp;
+    test_camp->define_camp( camp_omt, "faction_base_bare_bones_NPC_camp_0", false );
+
+    // Add an expansion one OMT to the east.
+    const tripoint_abs_omt expansion_omt = camp_omt + tripoint::east;
+    test_camp->add_expansion( "faction_base_farm_0", expansion_omt,
+                              point_rel_omt{ 1, 0 } );
+    REQUIRE( test_camp->point_within_camp( expansion_omt ) );
+
+    // Spawn NPC anywhere, then teleport to the expansion tile.
+    npc &guy = spawn_npc( mid.xy(), "test_talker" );
+    clear_character( guy, true );
+    const tripoint_abs_ms expansion_center =
+        project_to<coords::ms>( expansion_omt ) + tripoint{ SEEX, SEEY, 0 };
+    const tripoint_bub_ms expansion_local = here.get_bub( expansion_center );
+    REQUIRE( here.inbounds( expansion_local ) );
+    guy.setpos( here, expansion_local );
+    guy.set_fac( faction_your_followers );
+    guy.set_mission( NPC_MISSION_CAMP_RESIDENT );
+    guy.assigned_camp = camp_omt;
+    guy.guard_pos = std::nullopt;
+    guy.clear_ai_guard_pos();
+
+    REQUIRE( guy.pos_abs_omt() == expansion_omt );
+    REQUIRE( guy.pos_abs_omt() != camp_omt );
+
+    SECTION( "on expansion tile: free_time, not return_to_camp" ) {
+        CHECK( bt_goal( guy ) == "free_time" );
+    }
+    SECTION( "on expansion tile: camp predicates treat as at-camp" ) {
+        behavior::character_oracle_t oracle( &guy );
+        CHECK( oracle.is_camp_idle( "" ) == behavior::status_t::running );
+        CHECK( oracle.is_away_from_camp( "" ) == behavior::status_t::failure );
+    }
+    SECTION( "on expansion tile with job: camp_work fires" ) {
+        guy.job.set_all_priorities( 1 );
+        REQUIRE( guy.has_job() );
+        guy.last_job_scan = calendar::turn - 11_minutes;
+        behavior::character_oracle_t oracle( &guy );
+        CHECK( oracle.has_camp_job( "" ) == behavior::status_t::running );
+        CHECK( oracle.camp_work_urgency( "" ) > 0.0f );
     }
 }
 

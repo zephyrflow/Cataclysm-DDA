@@ -250,6 +250,8 @@ RGBTuple color_loader<RGBTuple>::from_rgb( const int r, const int g, const int b
 #include <imgui/imgui_impl_sdl2.h>
 #include <imgui/imgui_impl_sdlrenderer2.h>
 
+static bool clear_screen = false;
+
 ImVec4 cataimgui::imvec4_from_color( const nc_color &color )
 {
     SDL_Color c = curses_color_to_SDL( color );
@@ -456,11 +458,14 @@ void cataimgui::client::load_fonts( UNUSED const Font_Ptr &gui_font,
         ImVector<ImWchar> ranges;
         b.BuildRanges( &ranges );
 
-        // Fonts[0] = gui, Fonts[1] = mono, Fonts[2] = gui 1.5x
+        const bool cjk = get_option<bool>( "IMGUI_LOAD_CHINESE" );
+        // Fonts[0] = gui, Fonts[1] = mono, Fonts[2] = gui 1.5x (non-CJK only)
         load_font( io, gui_typefaces, ranges.begin() );
         load_font( io, mono_typefaces, ranges.begin() );
-        load_font( io, gui_typefaces, ranges.begin(),
-                   static_cast<float>( lroundf( fontheight * 1.5f ) ) );
+        if( !cjk ) {
+            load_font( io, gui_typefaces, ranges.begin(),
+                       static_cast<float>( lroundf( fontheight * 1.5f ) ) );
+        }
         for( int i = 0; i < io.Fonts->Fonts.Size; i++ ) {
             io.Fonts->Fonts[i]->SetFallbackStrSizeCallback( GetFallbackStrWidth );
             io.Fonts->Fonts[i]->SetFallbackCharSizeCallback( GetFallbackCharWidth );
@@ -586,6 +591,10 @@ void cataimgui::client::new_frame()
         ImGui_ImplSDLRenderer2_CreateDeviceObjects();
     }
 #endif
+    if( clear_screen ) {
+        clear_screen = false;
+        clear_sdl_window();
+    }
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
 
@@ -606,6 +615,11 @@ void cataimgui::client::end_frame()
     cata_input_trail.clear();
 }
 
+bool cataimgui::clear_pending()
+{
+    return clear_screen;
+}
+
 void cataimgui::client::process_input( void *input )
 {
     if( any_window_shown() ) {
@@ -613,10 +627,10 @@ void cataimgui::client::process_input( void *input )
         bool no_mouse = ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_NoMouse;
         if( no_mouse ) {
             switch( evt->type ) {
-                case SDL_MOUSEMOTION:
-                case SDL_MOUSEWHEEL:
-                case SDL_MOUSEBUTTONDOWN:
-                case SDL_MOUSEBUTTONUP:
+                case CATA_MOUSEMOTION:
+                case CATA_MOUSEWHEEL:
+                case CATA_MOUSEBUTTONDOWN:
+                case CATA_MOUSEBUTTONUP:
                     return;
             }
         }
@@ -897,6 +911,10 @@ cataimgui::window::~window()
         if( !ui_adaptor::has_imgui() ) {
             ImGui::GetIO().ClearInputKeys();
             GImGui->InputEventsQueue.resize( 0 );
+#ifdef TILES
+            // Removes leftover ImGui artifacts
+            clear_screen = true;
+#endif
         }
     }
 }
@@ -1125,7 +1143,26 @@ void cataimgui::PushMonoFont()
 void cataimgui::PushGuiFont1_5x()
 {
 #ifdef TILES
-    ImGui::PushFont( ImGui::GetIO().Fonts->Fonts[2] );
+    if( ImGui::GetIO().Fonts->Fonts.Size > 2 ) {
+        ImGui::PushFont( ImGui::GetIO().Fonts->Fonts[2] );
+    } else {
+        // CJK mode: no pre-rasterized 1.5x font, fall back to bitmap scaling.
+        // TODO: find a better solution - SetWindowFontScale is obsolete in ImGui
+        // and produces blurry text. Possible ideas: split the atlas into multiple
+        // textures, or use a smaller glyph subset for the scaled font.
+        ImGui::SetWindowFontScale( 1.5f );
+    }
+#endif
+}
+
+void cataimgui::PopGuiFont1_5x()
+{
+#ifdef TILES
+    if( ImGui::GetIO().Fonts->Fonts.Size > 2 ) {
+        ImGui::PopFont();
+    } else {
+        ImGui::SetWindowFontScale( 1.0f );
+    }
 #endif
 }
 

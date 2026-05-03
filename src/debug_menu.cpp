@@ -176,7 +176,6 @@ static const trait_id trait_DEBUG_MANA( "DEBUG_MANA" );
 static const trait_id trait_DEBUG_MIND_CONTROL( "DEBUG_MIND_CONTROL" );
 static const trait_id trait_DEBUG_NODMG( "DEBUG_NODMG" );
 static const trait_id trait_DEBUG_NOTEMP( "DEBUG_NOTEMP" );
-static const trait_id trait_DEBUG_PHASE_MOVEMENT( "DEBUG_PHASE_MOVEMENT" );
 static const trait_id trait_DEBUG_SPEED( "DEBUG_SPEED" );
 static const trait_id trait_DEBUG_STAMINA( "DEBUG_STAMINA" );
 static const trait_id trait_NONE( "NONE" );
@@ -537,7 +536,7 @@ class mission_debug
 // Used for quick setup
 static std::vector<trait_id> setup_traits{trait_DEBUG_BIONICS, trait_DEBUG_CLAIRVOYANCE, trait_DEBUG_CLOAK,
            trait_DEBUG_HS, trait_DEBUG_LIGHT, trait_DEBUG_LS, trait_DEBUG_MANA, trait_DEBUG_MIND_CONTROL,
-           trait_DEBUG_NODMG, trait_DEBUG_NOTEMP, trait_DEBUG_PHASE_MOVEMENT, trait_DEBUG_STAMINA, trait_DEBUG_SPEED};
+           trait_DEBUG_NODMG, trait_DEBUG_NOTEMP, trait_DEBUG_STAMINA, trait_DEBUG_SPEED};
 
 static std::string first_word( const std::string &str )
 {
@@ -2277,8 +2276,9 @@ static void character_edit_desc_menu( Character &you )
         break;
         case 2: {
             int result = you.base_age();
-            if( query_int( result, true, _( "Enter age in years.  Minimum 16, maximum 55" ) ) && result > 0 ) {
-                you.set_base_age( clamp( result, 16, 55 ) );
+            if( query_int( result, true, _( "Enter age in years.  Minimum %d, maximum %d" ), CHARACTER_AGE_MIN,
+                           CHARACTER_AGE_MAX ) && result > 0 ) {
+                you.set_base_age( clamp( result, CHARACTER_AGE_MIN, CHARACTER_AGE_MAX ) );
             }
         }
         break;
@@ -3513,9 +3513,9 @@ static void game_report()
             _( "Copy game report to clipboard?" ) +
             std::string( "\n\n" ) +
             _( "If not copied to clipboard it will be displayed on screen as a message.  You will have to copy it down or record it manually." ) ) ) {
-        int clipboard_result = SDL_SetClipboardText( report.c_str() );
-        printErrorIf( clipboard_result != 0, "Error while copying the game report to the clipboard." );
-        if( clipboard_result == 0 ) {
+        const bool clipboard_ok = SetClipboardText( report );
+        printErrorIf( !clipboard_ok, "Error while copying the game report to the clipboard." );
+        if( clipboard_ok ) {
             popup_msg += _( " and to the clipboard." );
         }
     } else {

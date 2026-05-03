@@ -120,6 +120,14 @@ template <typename E> struct enum_traits;
 
 using bionic_uid = unsigned int;
 
+const int CHARACTER_STAT_MIN = 4;
+const int CHARACTER_STAT_MAX = 20;
+
+const int CHARACTER_AGE_MIN = 16;
+const int CHARACTER_AGE_MAX = 55;
+
+const int NAME_CHARACTER_LIMIT = 50;
+
 extern int character_max_str;
 extern int character_max_dex;
 extern int character_max_per;
@@ -137,11 +145,7 @@ enum vision_modes {
     NIGHTVISION_1,
     NIGHTVISION_2,
     NIGHTVISION_3,
-    FULL_ELFA_VISION,
-    ELFA_VISION,
     CEPH_VISION,
-    /// mutate w/ id "FEL_NV" & name "Feline Vision" see pretty well at night
-    FELINE_VISION,
     /// Bird mutation named "Avian Eyes": Perception +4
     BIRD_EYE,
     /// mutate w/ id "URSINE_EYE" & name "Ursine Vision" see better in dark, nearsight in light
@@ -254,6 +258,7 @@ enum class blood_type {
     blood_A,
     blood_B,
     blood_AB,
+    blood_acid,
     num_bt
 };
 
@@ -774,8 +779,8 @@ class Character : public Creature, public visitable
         std::vector<aim_type> get_aim_types( const item &gun ) const;
         int point_shooting_limit( const item &gun ) const;
         double fastest_aiming_method_speed( const item &gun, double recoil,
-                                            const Target_attributes &target_attributes = Target_attributes(),
-                                            std::optional<std::reference_wrapper<const parallax_cache>> parallax_cache = std::nullopt ) const;
+                                            const Target_attributes &target_attributes,
+                                            const parallax_cache &parallaxes ) const;
         int most_accurate_aiming_method_limit( const item &gun ) const;
         double aim_factor_from_volume( const item &gun ) const;
         double aim_factor_from_length( const item &gun ) const;
@@ -797,8 +802,8 @@ class Character : public Creature, public visitable
         * Use a struct to avoid repeatedly calculate some modifiers that are actually persistent for aiming UI drawing.
         */
         double aim_per_move( const item &gun, double recoil,
-                             const Target_attributes &target_attributes = Target_attributes(),
-                             std::optional<std::reference_wrapper<const aim_mods_cache>> aim_cache = std::nullopt ) const;
+                             const Target_attributes &target_attributes,
+                             const aim_mods_cache &aim_cache ) const;
 
         int get_dodges_left() const;
         void set_dodges_left( int dodges );
@@ -1911,8 +1916,19 @@ class Character : public Creature, public visitable
          */
         void mend_item( item_location &&obj, bool interactive = true );
 
+        /**
+         * Build the list of reload_option entries for selecting reload ammo
+         * for `base`. With `per_well_targets` false the function emits one
+         * option per item (base and each gunmod) plus one per loaded
+         * magazine, all carrying reload_option::pocket_index = -1, which
+         * routes execution through the first-compatible-well selection
+         * inside item::reload. With `per_well_targets` true it additionally
+         * walks every MAGAZINE_WELL pocket on the base item and on each
+         * gunmod, emitting per-well reload targets whose pocket_index
+         * identifies the specific well in target->contents.
+         */
         bool list_ammo( const item_location &base, std::vector<item::reload_option> &ammo_list,
-                        bool empty = true ) const;
+                        bool empty = true, bool per_well_targets = false ) const;
         /**
          * Select suitable ammo with which to reload the item
          * @param base Item to select ammo for
@@ -2215,8 +2231,12 @@ class Character : public Creature, public visitable
          * @param obj item to be reloaded. By design any currently loaded ammunition or magazine is ignored
          * @param empty whether empty magazines should be considered as possible ammo
          * @param radius adjacent map/vehicle tiles to search. 0 for only player tile, -1 for only inventory
+         * @param now if true, only match candidates that can actually be loaded into obj right now
+         *        (i.e. obj has capacity for them); if false, match any type-compatible candidate
+         *        regardless of current capacity.
          */
-        std::vector<item_location> find_ammo( const item &obj, bool empty = true, int radius = 1 ) const;
+        std::vector<item_location> find_ammo( const item &obj, bool empty = true, int radius = 1,
+                                              bool now = true ) const;
 
         /**
          * Searches for weapons and magazines that can be reloaded.
@@ -4309,6 +4329,12 @@ template<>
 struct enum_traits<character_stat> {
     static constexpr character_stat last = character_stat::DUMMY_STAT;
 };
+
+namespace io
+{
+std::string enum_to_full_string( character_stat data );
+} // namespace io
+
 /// Get translated name of a stat
 std::string get_stat_name( character_stat Stat );
 #endif // CATA_SRC_CHARACTER_H

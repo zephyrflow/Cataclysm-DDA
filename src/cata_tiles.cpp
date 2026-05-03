@@ -606,62 +606,63 @@ void tileset_cache::loader::load_tileset( const cata_path &img_path, const bool 
 
     if( R >= 0 && R <= 255 && G >= 0 && G <= 255 && B >= 0 && B <= 255 ) {
         const Uint32 key = MapRGB( tile_atlas, 0, 0, 0 );
-        throwErrorIf( SetColorKey( tile_atlas, SDL_TRUE, key ) != 0,
+        throwErrorIf( SetColorKey( tile_atlas, 1, key ) != 0,
                       "SDL_SetColorKey failed" );
         throwErrorIf( SetSurfaceRLE( tile_atlas, 1 ), "SDL_SetSurfaceRLE failed" );
     }
 
-    SDL_RendererInfo info;
-    throwErrorIf( SDL_GetRendererInfo( renderer.get(), &info ) != 0, "SDL_GetRendererInfo failed" );
+    int max_tex_w = 0;
+    int max_tex_h = 0;
+    throwErrorIf( !GetRendererMaxTextureSize( renderer, &max_tex_w, &max_tex_h ),
+                  "GetRendererMaxTextureSize failed" );
     // Software rendering stores textures as surfaces with run-length encoding, which makes
     // extracting a part in the middle of the texture slow. Therefore this "simulates" that the
-    // renderer only supports one tile
-    // per texture. Each tile will go on its own texture object.
-    if( info.flags & SDL_RENDERER_SOFTWARE ) {
-        info.max_texture_width = sprite_width;
-        info.max_texture_height = sprite_height;
+    // renderer only supports one tile per texture.
+    if( IsRendererSoftware( renderer ) ) {
+        max_tex_w = sprite_width;
+        max_tex_h = sprite_height;
     }
     // for debugging only: force a very small maximal texture size, as to trigger
     // splitting the tile atlas.
 #if 0
     // +1 to check correct rounding
-    info.max_texture_width = sprite_width * 10 + 1;
-    info.max_texture_height = sprite_height * 20 + 1;
+    max_tex_w = sprite_width * 10 + 1;
+    max_tex_h = sprite_height * 20 + 1;
 #endif
 
     const int min_tile_xcount = 128;
     const int min_tile_ycount = min_tile_xcount * 2;
 
-    if( info.max_texture_width == 0 ) {
-        info.max_texture_width = sprite_width * min_tile_xcount;
-        DebugLog( D_INFO, DC_ALL ) << "SDL_RendererInfo max_texture_width was set to 0. " <<
-                                   " Changing it to " << info.max_texture_width;
+    if( max_tex_w == 0 ) {
+        max_tex_w = sprite_width * min_tile_xcount;
+        DebugLog( D_INFO, DC_ALL ) << "Renderer max_texture_width was 0. "
+                                   << "Changed to " << max_tex_w;
     } else {
-        throwErrorIf( info.max_texture_width < sprite_width,
+        throwErrorIf( max_tex_w < sprite_width,
                       "Maximal texture width is smaller than tile width" );
     }
 
-    if( info.max_texture_height == 0 ) {
-        info.max_texture_height = sprite_height * min_tile_ycount;
-        DebugLog( D_INFO, DC_ALL ) << "SDL_RendererInfo max_texture_height was set to 0. " <<
-                                   " Changing it to " << info.max_texture_height;
+    if( max_tex_h == 0 ) {
+        max_tex_h = sprite_height * min_tile_ycount;
+        DebugLog( D_INFO, DC_ALL ) << "Renderer max_texture_height was 0. "
+                                   << "Changed to " << max_tex_h;
     } else {
-        throwErrorIf( info.max_texture_height < sprite_height,
+        throwErrorIf( max_tex_h < sprite_height,
                       "Maximal texture height is smaller than tile height" );
     }
 
     // Number of tiles in each dimension that fits into a (maximal) SDL texture.
     // If the tile atlas contains more than that, we have to split it.
-    const int max_tile_xcount = info.max_texture_width / sprite_width;
-    const int max_tile_ycount = info.max_texture_height / sprite_height;
+    const int max_tile_xcount = max_tex_w / sprite_width;
+    const int max_tile_ycount = max_tex_h / sprite_height;
     // Range over the tile atlas, wherein each rectangle fits into the maximal
     // SDL texture size. In other words: a range over the parts into which the
     // tile atlas needs to be split.
     const rect_range<SDL_Rect> output_range(
         max_tile_xcount * sprite_width,
         max_tile_ycount * sprite_height,
-        point( divide_round_up( tile_atlas->w, info.max_texture_width ),
-               divide_round_up( tile_atlas->h, info.max_texture_height ) ) );
+        point( divide_round_up( tile_atlas->w, max_tex_w ),
+               divide_round_up( tile_atlas->h, max_tex_h ) ) );
 
     const int expected_tilecount = ( tile_atlas->w / sprite_width ) *
                                    ( tile_atlas->h / sprite_height );
@@ -1859,7 +1860,13 @@ void cata_tiles::draw( const point &dest, const tripoint_bub_ms &center, int wid
         // For each row
         const bool iso = is_isometric();
         const level_cache &zlev_cache = here.access_cache( cur_zlevel );
-        const bool zlev_has_color = zlev_cache.has_colored_lights;
+        // FIXME: colored light tint overlay disabled in isometric mode pending
+        // a non-silhouette implementation. The hybrid mask path requires render
+        // target switches that stall the GPU pipeline, and the simple diamond
+        // path alone does not justify the per-sprite bounds tracking overhead
+        // in the layer loop. Revisit when SDL_gpu or a shader-based tint path
+        // is available.
+        const bool zlev_has_color = zlev_cache.has_colored_lights && !iso;
         for( int row = cur_any_tile_range.p_min.y; row < cur_any_tile_range.p_max.y; row ++ ) {
             // --- Per-tile prepass ---
             // Initialize base height and decide which tiles need a colored light
@@ -2060,7 +2067,7 @@ void cata_tiles::draw( const point &dest, const tripoint_bub_ms &center, int wid
                                     rec.destination.h
                                 };
                                 sil->render_copy_ex( renderer, &mask_dest, rec.angle, nullptr,
-                                                     static_cast<SDL_RendererFlip>( rec.flip ) );
+                                                     static_cast<CataFlipMode>( rec.flip ) );
                             }
                         }
 
@@ -2328,6 +2335,11 @@ void cata_tiles::draw_minimap( const point &dest, const tripoint_bub_ms &center,
 {
     minimap->set_type( is_isometric() ? pixel_minimap_type::iso : pixel_minimap_type::ortho );
     minimap->draw( SDL_Rect{ dest.x, dest.y, width, height }, center );
+}
+
+bool cata_tiles::has_blinking_minimap() const
+{
+    return minimap->has_blinking_beacons();
 }
 
 point cata_tiles::get_window_base_tile_counts(
@@ -3476,20 +3488,20 @@ bool cata_tiles::draw_sprite_at(
     // and for recording into tint_sprites (which replays the sprite as a white
     // silhouette during the tint overlay pass). Compute them once here.
     double render_angle = 0;
-    SDL_RendererFlip render_flip = SDL_FLIP_NONE;
+    CataFlipMode render_flip = SDL_FLIP_NONE;
     if( rotate_sprite ) {
         if( rota == -1 ) {
             render_flip = SDL_FLIP_HORIZONTAL;
         } else if( !iso ) {
             switch( rota % 4 ) {
                 case 1:
-                    render_angle = -90;
+                    render_angle = 90;
                     break;
                 case 2:
-                    render_flip = static_cast<SDL_RendererFlip>( SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL );
+                    render_flip = static_cast<CataFlipMode>( SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL );
                     break;
                 case 3:
-                    render_angle = 90;
+                    render_angle = -90;
                     break;
                 default:
                     break;
@@ -3511,7 +3523,7 @@ bool cata_tiles::draw_sprite_at(
             // flip horizontally
             ret = sprite_tex->render_copy_ex(
                       renderer, &destination, 0, nullptr,
-                      static_cast<SDL_RendererFlip>( SDL_FLIP_HORIZONTAL ) );
+                      static_cast<CataFlipMode>( SDL_FLIP_HORIZONTAL ) );
         } else {
             switch( rota % 4 ) {
                 default:
@@ -3531,7 +3543,7 @@ bool cata_tiles::draw_sprite_at(
 #endif
                     if( !iso ) {
                         // never rotate isometric tiles
-                        ret = sprite_tex->render_copy_ex( renderer, &destination, -90, nullptr,
+                        ret = sprite_tex->render_copy_ex( renderer, &destination, 90, nullptr,
                                                           SDL_FLIP_NONE );
                     } else {
                         ret = sprite_tex->render_copy_ex( renderer, &destination, 0, nullptr,
@@ -3544,7 +3556,7 @@ bool cata_tiles::draw_sprite_at(
                         // never flip isometric tiles vertically
                         ret = sprite_tex->render_copy_ex(
                                   renderer, &destination, 0, nullptr,
-                                  static_cast<SDL_RendererFlip>( SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL ) );
+                                  static_cast<CataFlipMode>( SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL ) );
                     } else {
                         ret = sprite_tex->render_copy_ex( renderer, &destination, 0, nullptr,
                                                           SDL_FLIP_NONE );
@@ -3561,7 +3573,7 @@ bool cata_tiles::draw_sprite_at(
 #endif
                     if( !iso ) {
                         // never rotate isometric tiles
-                        ret = sprite_tex->render_copy_ex( renderer, &destination, 90, nullptr,
+                        ret = sprite_tex->render_copy_ex( renderer, &destination, -90, nullptr,
                                                           SDL_FLIP_NONE );
                     } else {
                         ret = sprite_tex->render_copy_ex( renderer, &destination, 0, nullptr,
@@ -4311,7 +4323,7 @@ bool cata_tiles::draw_vpart( const tripoint_bub_ms &p, lit_level ll, int &height
         const vpart_display vd = veh.get_display_of_tile( ovp->mount_pos() );
         if( !vd.id.is_null() ) {
             const int subtile = vd.is_open ? open_ : vd.is_broken ? broken : 0;
-            const int rotation = angle_to_dir4( 270_degrees - veh.face.dir() );
+            const int rotation = angle_to_dir4( veh.face.dir() - 270_degrees );
             avatar &you = get_avatar();
             if( !veh.forward_velocity() && !veh.player_in_control( here, you )
                 && !( you.get_grab_type() == object_type::VEHICLE
@@ -4348,7 +4360,7 @@ bool cata_tiles::draw_vpart( const tripoint_bub_ms &p, lit_level ll, int &height
         if( vp2 ) {
             const char part_mod = std::get<1>( override->second );
             const int subtile = part_mod == 1 ? open_ : part_mod == 2 ? broken : 0;
-            const int rotation = angle_to_dir4( 270_degrees - std::get<2>( override->second ) );
+            const int rotation = angle_to_dir4( std::get<2>( override->second ) - 270_degrees );
             const int draw_highlight = std::get<3>( override->second );
             const std::string vpname = "vp_" + vp2.str();
             // tile overrides are never memorized
@@ -5510,19 +5522,19 @@ void cata_tiles::get_rotation_and_subtile( const char val, const char rot_to, in
             // horizontal end piece E
             subtile = end_piece;
             if( no_rotation ) {
-                rotation = 3;
+                rotation = 1;
                 break;
             }
-            rotation = 3 + 4 * get_rotation_edge_ew( rot_to );
+            rotation = 1 + 4 * get_rotation_edge_ew( rot_to );
             break;
         case 2:
             // horizontal end piece W
             subtile = end_piece;
             if( no_rotation ) {
-                rotation = 1;
+                rotation = 3;
                 break;
             }
-            rotation = 1 + 4 * get_rotation_edge_ew( rot_to );
+            rotation = 3 + 4 * get_rotation_edge_ew( rot_to );
             break;
         case 1:
             // vertical end piece N
@@ -5568,7 +5580,7 @@ void cata_tiles::get_rotation_and_subtile( const char val, const char rot_to, in
             break;
         case 10:
             subtile = corner;
-            rotation = 1;
+            rotation = 3;
             break;
         case 3:
             subtile = corner;
@@ -5576,7 +5588,7 @@ void cata_tiles::get_rotation_and_subtile( const char val, const char rot_to, in
             break;
         case 5:
             subtile = corner;
-            rotation = 3;
+            rotation = 1;
             break;
         // all t_connections
         case 14:
@@ -5585,7 +5597,7 @@ void cata_tiles::get_rotation_and_subtile( const char val, const char rot_to, in
             break;
         case 11:
             subtile = t_connection;
-            rotation = 1;
+            rotation = 3;
             break;
         case 7:
             subtile = t_connection;
@@ -5593,7 +5605,7 @@ void cata_tiles::get_rotation_and_subtile( const char val, const char rot_to, in
             break;
         case 13:
             subtile = t_connection;
-            rotation = 3;
+            rotation = 1;
             break;
     }
 }
@@ -5657,26 +5669,26 @@ int cata_tiles::get_rotation_unconnected( const char rot_to )
             rotation = 2;
             break;
         case static_cast<int>( NEIGHBOUR::EAST ):
-            rotation = 3;
+            rotation = 1;
             break;
         case static_cast<int>( NEIGHBOUR::SOUTH ):
             rotation = 0;
             break;
         case static_cast<int>( NEIGHBOUR::WEST ):
-            rotation = 1;
+            rotation = 3;
             break;
         // Two tiles, resulting in diagonal
         case 10: // NE
             rotation = 6;
             break;
         case 3: // SE
-            rotation = 7;
+            rotation = 5;
             break;
         case 5: // SW
             rotation = 4;
             break;
         case 12: // NW
-            rotation = 5;
+            rotation = 7;
             break;
         // Cases for three tiles to rotate to -> easy
         // Arranged to fallback / modulo to fitting index 0-4
@@ -5684,13 +5696,13 @@ int cata_tiles::get_rotation_unconnected( const char rot_to )
             rotation = 10;
             break;
         case 11: // 3 but west --> modulo = east
-            rotation = 11;
+            rotation = 9;
             break;
         case 7: // 3 but north --> modulo = south
             rotation = 8;
             break;
         case 13: // 3 but east --> modulo = west
-            rotation = 9;
+            rotation = 11;
             break;
         // Two opposing tiles, (No tiles, all tiles; see first cases)
         case 9: // N-S
@@ -5881,7 +5893,7 @@ void cata_tiles::do_tile_loading_report()
     map_extra_ids.erase(
         std::remove_if( map_extra_ids.begin(), map_extra_ids.end(),
     []( const map_extra_id & id ) {
-        return !id->autonote;
+        return id->visibility == map_extra_visibility::none;
     } ), map_extra_ids.end() );
     tile_loading_report_seq_ids( map_extra_ids, TILE_CATEGORY::MAP_EXTRA );
 
@@ -5972,16 +5984,15 @@ std::vector<options_manager::id_and_option> cata_tiles::build_renderer_list()
         { "opengl", to_translation( "opengl" ) },
         { "opengles2", to_translation( "opengles2" ) },
     };
-    int numRenderDrivers = SDL_GetNumRenderDrivers();
+    const int numRenderDrivers = GetNumRenderDrivers();
     for( int ii = 0; ii < numRenderDrivers; ii++ ) {
-        SDL_RendererInfo ri;
-        SDL_GetRenderDriverInfo( ii, &ri );
+        const char *name = GetRenderDriverName( ii );
         // First default renderer name we will put first on the list. We can use it later as
         // default value.
-        if( ri.name == default_renderer_names.front().first ) {
+        if( name == default_renderer_names.front().first ) {
             renderer_names.emplace( renderer_names.begin(), default_renderer_names.front() );
         } else {
-            renderer_names.emplace_back( ri.name, no_translation( ri.name ) );
+            renderer_names.emplace_back( name, no_translation( name ) );
         }
     }
     DebugLog( D_INFO, DC_ALL ) << "SDL render devices: " << enumerate_as_string( renderer_names,
@@ -5999,11 +6010,11 @@ std::vector<options_manager::id_and_option> cata_tiles::build_display_list()
         { "0", to_translation( "Display 0" ) }
     };
 
-    int numdisplays = SDL_GetNumVideoDisplays();
+    const int numdisplays = GetNumVideoDisplays();
     display_names.reserve( numdisplays );
     for( int i = 0 ; i < numdisplays ; i++ ) {
         display_names.emplace_back( std::to_string( i ),
-                                    no_translation( SDL_GetDisplayName( i ) ) );
+                                    no_translation( GetDisplayName( i ) ) );
     }
 
     return display_names.empty() ? default_display_names : display_names;

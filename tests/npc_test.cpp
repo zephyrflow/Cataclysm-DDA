@@ -88,6 +88,7 @@ static const efftype_id effect_bouldering( "bouldering" );
 static const efftype_id effect_catch_up( "catch_up" );
 static const efftype_id effect_lying_down( "lying_down" );
 static const efftype_id effect_meth( "meth" );
+static const efftype_id effect_npc_run_away( "npc_run_away" );
 static const efftype_id effect_npc_suspend( "npc_suspend" );
 static const efftype_id effect_sleep( "sleep" );
 static const efftype_id effect_wet( "wet" );
@@ -491,7 +492,7 @@ TEST_CASE( "npc-board-player-vehicle" )
             /* Uncomment for some extra info when test fails
             debug_mode = true;
             debugmode::enabled_filters.clear();
-            debugmode::enabled_filters.emplace_back( debugmode::DF_NPC );
+            debugmode::enabled_filters.emplace( debugmode::DF_NPC );
             REQUIRE( debugmode::enabled_filters.size() == 1 );
             */
 
@@ -1384,6 +1385,67 @@ TEST_CASE( "npc_nonally_sleeps_when_tired", "[npc][needs]" )
         CHECK_FALSE( guy.has_effect( effect_sleep ) );
         CHECK_FALSE( guy.has_effect( effect_lying_down ) );
     }
+}
+
+// Thugs are guaranteed_hostile() by faction but start NPCATT_NULL.
+// assess_danger() must detect faction hostility so combat beats sleep.
+
+TEST_CASE( "faction_hostile_npc_detects_player_threat", "[npc][npc_ai]" )
+{
+    g->faction_manager_ptr->create_if_needed();
+    clear_map_without_vision();
+    clear_avatar();
+    set_time_to_day();
+
+    Character &player_character = get_player_character();
+    npc &bandit = spawn_npc( player_character.pos_bub().xy() + point::south, "thug" );
+    REQUIRE( rl_dist( player_character.pos_bub(), bandit.pos_bub() ) <= 1 );
+
+    // Thug is guaranteed_hostile by faction, but attitude has not flipped yet.
+    REQUIRE( bandit.guaranteed_hostile() );
+    REQUIRE_FALSE( bandit.is_enemy() );
+
+    bandit.regen_ai_cache();
+
+    // assess_danger() must count the player as a threat even before the
+    // attitude enum flips to NPCATT_KILL.
+    CHECK( bandit.get_ai_danger() > 0 );
+    CHECK( bandit.current_target() == static_cast<Creature *>( &player_character ) );
+}
+
+TEST_CASE( "faction_hostile_tired_npc_fights_not_sleeps", "[npc][npc_ai][needs]" )
+{
+    g->faction_manager_ptr->create_if_needed();
+    clear_map_without_vision();
+    clear_avatar();
+    // 30+ minutes past turn_zero so can_sleep() cooldown does not interfere.
+    calendar::turn = calendar::turn_zero + 1_hours;
+
+    Character &player_character = get_player_character();
+    npc &bandit = spawn_npc( player_character.pos_bub().xy() + point( 0, 3 ), "thug" );
+    clear_character( bandit, true );
+    bandit.set_hunger( 0 );
+    bandit.set_thirst( 0 );
+    bandit.set_stored_kcal( bandit.get_healthy_kcal() );
+    bandit.set_all_parts_temp_conv( BODYTEMP_NORM );
+    bandit.set_all_parts_temp_cur( BODYTEMP_NORM );
+    // Exhausted -- would sleep if no danger present.
+    bandit.set_sleepiness( 800 );
+    bandit.set_moves( 100 );
+
+    // Thug is guaranteed_hostile by faction, but attitude starts neutral.
+    // The move() pipeline must detect the player as a threat and choose
+    // combat over sleep.
+    REQUIRE( bandit.guaranteed_hostile() );
+    REQUIRE_FALSE( bandit.is_enemy() );
+
+    bandit.move();
+
+    // Must NOT have fallen asleep.
+    CHECK_FALSE( bandit.has_effect( effect_sleep ) );
+    CHECK_FALSE( bandit.has_effect( effect_lying_down ) );
+    // The attitude must have flipped to hostile.
+    CHECK( bandit.is_enemy() );
 }
 
 // ---------------------------------------------------------------------------
@@ -3840,7 +3902,7 @@ TEST_CASE( "bt_idle_falls_through_to_cascade_goto", "[npc][behavior]" )
     CHECK( rl_dist( guy.pos_abs(), target ) < 5 );
 }
 
-TEST_CASE( "anchored_follower_uses_duty_not_follow", "[npc][behavior]" )
+TEST_CASE( "recruited_follower_with_guard_pos_follows_player", "[npc][behavior]" )
 {
     clear_map_without_vision();
     clear_avatar();
@@ -3857,7 +3919,6 @@ TEST_CASE( "anchored_follower_uses_duty_not_follow", "[npc][behavior]" )
     guy.set_fac( faction_your_followers );
     guy.set_attitude( NPCATT_FOLLOW );
     guy.rules.set_flag( ally_rule::follow_close );
-    guy.set_mission( NPC_MISSION_GUARD_ALLY );
     const tripoint_abs_ms post = guy.pos_abs() + tripoint( 10, 0, 0 );
     guy.set_guard_pos( post );
     calendar::turn = calendar::turn_zero + 12_hours;
@@ -3873,16 +3934,21 @@ TEST_CASE( "anchored_follower_uses_duty_not_follow", "[npc][behavior]" )
     const auto &[wh_start, wh_end] = guy.myclass.obj().get_work_hours();
     REQUIRE( ( wh_start == 0 && wh_end == 24 ) );
     REQUIRE( guy.get_guard_post().has_value() );
+    REQUIRE( guy.is_walking_with() );
     REQUIRE( guy.pos_abs() != post );
     REQUIRE( rl_dist( guy.pos_abs(), get_player_character().pos_abs() ) > 4 );
 
-    SECTION( "BT returns return_to_guard_pos, not follow_player" ) {
+    SECTION( "BT picks follow_player, suppresses duty" ) {
         behavior::character_oracle_t oracle( &guy );
+        CHECK( oracle.on_shift( "" ) == behavior::status_t::failure );
+        CHECK( oracle.displaced_from_post( "" ) == behavior::status_t::failure );
+        CHECK( oracle.duty_urgency( "" ) == Approx( 0.0f ) );
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::running );
         behavior::tree decision_tree;
         decision_tree.add( &behavior_node_t_npc_decision.obj() );
-        CHECK( decision_tree.tick( &oracle ) == "return_to_guard_pos" );
+        CHECK( decision_tree.tick( &oracle ) == "follow_player" );
     }
-    SECTION( "live turns: NPC moves toward post, not player" ) {
+    SECTION( "live turns: NPC closes distance to player, not post" ) {
         const int initial_dist_post = rl_dist( guy.pos_abs(), post );
         const int initial_dist_player = rl_dist( guy.pos_abs(),
                                         get_player_character().pos_abs() );
@@ -3890,10 +3956,34 @@ TEST_CASE( "anchored_follower_uses_duty_not_follow", "[npc][behavior]" )
             guy.set_moves( 100 );
             guy.move();
         }
-        CHECK( rl_dist( guy.pos_abs(), post ) < initial_dist_post );
         CHECK( rl_dist( guy.pos_abs(), get_player_character().pos_abs() )
-               > initial_dist_player );
+               < initial_dist_player );
+        CHECK( rl_dist( guy.pos_abs(), post ) >= initial_dist_post );
     }
+}
+
+TEST_CASE( "follow_only_engages_follow_regardless_of_rules", "[npc][behavior]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    get_player_character().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+
+    npc &guy = spawn_npc( { 50, 50 }, "test_talker" );
+    clear_character( guy, true );
+    guy.set_attitude( NPCATT_NULL );
+    // Simulate a stale "move freely" toggle from a prior interaction:
+    // base flag cleared. Mission-attached follow must engage anyway,
+    // since follow_close controls spacing, not whether-to-follow.
+    guy.rules.clear_flag( ally_rule::follow_close );
+    REQUIRE_FALSE( guy.rules.has_flag( ally_rule::follow_close ) );
+
+    talk_function::follow_only( guy );
+
+    CHECK( guy.get_attitude() == NPCATT_FOLLOW );
+    CHECK( guy.can_follow_player_now() );
+    // Loose-follow radius applies because follow_close stays cleared.
+    CHECK( guy.desired_follow_radius() == 6 );
 }
 
 TEST_CASE( "guard_assignment_clears_follow_commitment", "[npc][behavior]" )
@@ -3993,6 +4083,129 @@ TEST_CASE( "player_embarks_clears_follow_commitment", "[npc][behavior]" )
     guy.set_moves( 100 );
     guy.move();
     CHECK( guy.get_committed_goal() != "follow_player" );
+}
+
+// Followers wait while the player is in a moving vehicle: don't path into
+// the vehicle's trajectory, don't try to board until the player parks.
+TEST_CASE( "follower_yields_to_moving_player_vehicle", "[npc][behavior][vehicle]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &pc = get_player_character();
+    pc.setpos( here, tripoint_bub_ms( 65, 50, 0 ) );
+
+    npc &guy = spawn_npc( { 50, 50 }, "test_talker" );
+    clear_character( guy, true );
+    guy.set_fac( faction_your_followers );
+    guy.set_attitude( NPCATT_FOLLOW );
+    guy.rules.set_flag( ally_rule::follow_close );
+    guy.set_mission( NPC_MISSION_NULL );
+    guy.guard_pos = std::nullopt;
+    guy.clear_ai_guard_pos();
+
+    vehicle *veh = here.add_vehicle( vehicle_prototype_test_rv, pc.pos_bub(),
+                                     0_degrees, 100, 0 );
+    REQUIRE( veh != nullptr );
+    here.board_vehicle( pc.pos_bub(), &pc );
+    REQUIRE( pc.in_vehicle );
+    REQUIRE_FALSE( guy.in_vehicle );
+
+    behavior::character_oracle_t oracle( &guy );
+
+    SECTION( "parked: embark fires" ) {
+        veh->velocity = 0;
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::running );
+        CHECK( oracle.npc_embark_urgency( "" ) > 0.0f );
+    }
+    SECTION( "moving: follow and embark both fail, NPC waits" ) {
+        veh->velocity = 800;
+        CHECK( oracle.npc_is_following( "" ) == behavior::status_t::failure );
+        CHECK( oracle.npc_following_urgency( "" ) == Approx( 0.0f ) );
+        CHECK( oracle.npc_should_embark( "" ) == behavior::status_t::failure );
+        CHECK( oracle.npc_embark_urgency( "" ) == Approx( 0.0f ) );
+
+        const tripoint_abs_ms before = guy.pos_abs();
+        guy.set_moves( 100 );
+        guy.move();
+        // BT picks idle, dispatch returns npc_pause; NPC stays put.
+        CHECK( guy.pos_abs() == before );
+    }
+}
+
+// A close follower with no active combat action engages a hostile target in
+// range instead of standing idle.
+TEST_CASE( "follower_in_range_engages_target", "[npc][behavior][combat]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &pc = get_player_character();
+    pc.setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+
+    npc &guy = spawn_npc( { 49, 50 }, "test_talker" );
+    clear_character( guy, true );
+    guy.setpos( here, tripoint_bub_ms( 49, 50, 0 ) );
+    guy.set_fac( faction_your_followers );
+    guy.set_attitude( NPCATT_FOLLOW );
+    guy.rules.set_flag( ally_rule::follow_close );
+    guy.set_mission( NPC_MISSION_NULL );
+    guy.guard_pos = std::nullopt;
+    guy.clear_ai_guard_pos();
+    guy.set_wielded_item( item( itype_bat ) );
+
+    // Hostile zombie just past the player, within follow radius of NPC.
+    const tripoint_bub_ms zpos = pc.pos_bub() + point::east;
+    spawn_test_monster( "mon_zombie_brute_shocker", zpos );
+    here.build_map_cache( 0 );
+    guy.regen_ai_cache();
+    REQUIRE( guy.get_ai_danger() > NPC_DANGER_VERY_LOW );
+    REQUIRE( rl_dist( guy.pos_abs(), pc.pos_abs() ) <= guy.desired_follow_radius() );
+
+    guy.set_moves( 100 );
+    guy.move();
+    // Engaged target consumes moves; idle pause would leave them at 100.
+    CHECK( guy.get_moves() < 100 );
+}
+
+// A fleeing follower close to the player keeps fleeing and is not pulled
+// into combat by the engagement hook.
+TEST_CASE( "fleeing_follower_not_forced_to_attack", "[npc][behavior][combat]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &pc = get_player_character();
+    pc.setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+
+    npc &guy = spawn_npc( { 49, 50 }, "test_talker" );
+    clear_character( guy, true );
+    guy.setpos( here, tripoint_bub_ms( 49, 50, 0 ) );
+    guy.set_fac( faction_your_followers );
+    guy.set_attitude( NPCATT_FOLLOW );
+    guy.rules.set_flag( ally_rule::follow_close );
+    guy.set_mission( NPC_MISSION_NULL );
+    guy.guard_pos = std::nullopt;
+    guy.clear_ai_guard_pos();
+    guy.set_wielded_item( item( itype_bat ) );
+
+    const tripoint_bub_ms zpos = pc.pos_bub() + point::east;
+    monster &zomb = spawn_test_monster( "mon_zombie_brute_shocker", zpos );
+    here.build_map_cache( 0 );
+
+    guy.add_effect( effect_npc_run_away, 5_turns );
+    guy.regen_ai_cache();
+    REQUIRE( guy.has_effect( effect_npc_run_away ) );
+    REQUIRE( guy.get_ai_danger() > NPC_DANGER_VERY_LOW );
+    REQUIRE( rl_dist( guy.pos_abs(), pc.pos_abs() ) <= guy.desired_follow_radius() );
+
+    const int dist_before = rl_dist( guy.pos_abs(), zomb.pos_abs() );
+    guy.set_moves( 100 );
+    guy.move();
+    const int dist_after = rl_dist( guy.pos_abs(), zomb.pos_abs() );
+    // Fleeing NPC must not be forced into method_of_attack; distance to
+    // monster must not decrease (flee path moves away from target).
+    CHECK( dist_after >= dist_before );
 }
 
 TEST_CASE( "goto_order_beats_generic_follow", "[npc][behavior]" )
@@ -4840,11 +5053,11 @@ TEST_CASE( "npc_food_executor_contract", "[npc][needs][forage]" )
         here.ter_set( close, ter_t_tree_apple );
 
         // Far tree in the open (reachable).
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 0, -5, 0 );
-        here.ter_set( far, ter_t_tree_apple );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 0, -5, 0 );
+        here.ter_set( distant, ter_t_tree_apple );
         here.build_map_cache( 0 );
         REQUIRE( here.is_harvestable( close ) );
-        REQUIRE( here.is_harvestable( far ) );
+        REQUIRE( here.is_harvestable( distant ) );
 
         // The close tree must be the first candidate (closer = higher score).
         auto cands = guy.find_food_candidates();
@@ -4863,7 +5076,7 @@ TEST_CASE( "npc_food_executor_contract", "[npc][needs][forage]" )
         guy.set_moves( 100 );
         npc::need_result result = guy.execute_need_goal( "eat_food" );
         CHECK( guy.get_food_plan().active() );
-        CHECK( guy.get_food_plan().target == here.get_abs( far ) );
+        CHECK( guy.get_food_plan().target == here.get_abs( distant ) );
         CHECK( guy.get_food_plan().source_kind == need_source::harvestable );
         CHECK( result == npc::need_result::progressed );
     }
@@ -5496,8 +5709,8 @@ TEST_CASE( "npc_find_warmth_candidates", "[npc][needs][warmth]" )
     SECTION( "nearby clothing outranks distant shelter" ) {
         // Clothing at distance 1 (warmth ~30), shelter at distance 3 (score -3).
         here.add_item_or_charges( adj, item( itype_sweater ) );
-        tripoint_bub_ms far = guy.pos_bub() + tripoint( 3, 0, 0 );
-        here.ter_set( far, ter_t_floor );
+        tripoint_bub_ms distant = guy.pos_bub() + tripoint( 3, 0, 0 );
+        here.ter_set( distant, ter_t_floor );
         here.build_map_cache( 0 );
         auto cands = guy.find_warmth_candidates();
         REQUIRE( cands.size() >= 2 );
@@ -5582,8 +5795,8 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
     }
 
     SECTION( "distant ground clothing: move toward, progressed" ) {
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 4, 0, 0 );
-        here.add_item_or_charges( far, item( itype_sweater ) );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 4, 0, 0 );
+        here.add_item_or_charges( distant, item( itype_sweater ) );
         here.build_map_cache( 0 );
 
         guy.set_moves( 100 );
@@ -5594,8 +5807,8 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
     }
 
     SECTION( "distant shelter: move toward at low danger, progressed" ) {
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 4, 0, 0 );
-        here.ter_set( far, ter_t_floor );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 4, 0, 0 );
+        here.ter_set( distant, ter_t_floor );
         here.build_map_cache( 0 );
 
         guy.set_ai_danger( 0 );
@@ -5607,8 +5820,8 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
     }
 
     SECTION( "shelter movement blocked by danger, deferred" ) {
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 3, 0, 0 );
-        here.ter_set( far, ter_t_floor );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 3, 0, 0 );
+        here.ter_set( distant, ter_t_floor );
         here.build_map_cache( 0 );
 
         guy.set_ai_danger( NPC_DANGER_VERY_LOW + 1 );
@@ -5702,8 +5915,8 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
         }
         here.add_item_or_charges( close, item( itype_sweater ) );
         // Second sweater in the open.
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 0, -4, 0 );
-        here.add_item_or_charges( far, item( itype_sweater ) );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 0, -4, 0 );
+        here.add_item_or_charges( distant, item( itype_sweater ) );
         here.build_map_cache( 0 );
 
         auto cands = guy.find_warmth_candidates();
@@ -5720,7 +5933,7 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
         guy.set_moves( 100 );
         npc::need_result result = guy.execute_need_goal( "seek_warmth" );
         CHECK( guy.get_warmth_plan().active() );
-        CHECK( guy.get_warmth_plan().target == here.get_abs( far ) );
+        CHECK( guy.get_warmth_plan().target == here.get_abs( distant ) );
         CHECK( result == npc::need_result::progressed );
     }
 
@@ -5762,8 +5975,8 @@ TEST_CASE( "npc_seek_warmth_commitment_lifecycle", "[npc][needs][warmth]" )
 
     SECTION( "commitment clears when warmth resolves" ) {
         // Place distant clothing so seek_warmth activates.
-        const tripoint_bub_ms far = guy.pos_bub() + tripoint( 3, 0, 0 );
-        here.add_item_or_charges( far, item( itype_sweater ) );
+        const tripoint_bub_ms distant = guy.pos_bub() + tripoint( 3, 0, 0 );
+        here.add_item_or_charges( distant, item( itype_sweater ) );
         here.build_map_cache( 0 );
 
         guy.set_committed_goal( "seek_warmth" );
